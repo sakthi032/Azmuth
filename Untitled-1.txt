@@ -1,0 +1,191 @@
+Azmuth/
+│
+├── app/
+│   ├── __init__.py                          [DONE]
+│   │
+│   ├── core/                                # Cross-cutting primitives
+│   │   ├── __init__.py                      [DONE]
+│   │   ├── errors.py                        [DONE]  Exception hierarchy
+│   │   ├── events.py                        [STEP 2] EventBus + event names
+│   │   ├── interfaces.py                    [STEP 2] ABCs (Provider, Tool, ...)
+│   │   ├── registry.py                      [STEP 2] Generic name→factory registry
+│   │   └── container.py                     [STEP 2] Service container / DI
+│   │
+│   ├── brain/                               # Request orchestration
+│   │   ├── __init__.py                      [STEP 3]
+│   │   ├── azmuth.py                        [STEP 17] Top-level orchestrator
+│   │   ├── pipeline.py                      [STEP 17] Input→LLM→Tools→Response
+│   │   └── prompts.py                       [STEP 3] System prompts
+│   │
+│   ├── llm/                                 # LLM abstraction layer
+│   │   ├── __init__.py                      [STEP 3]
+│   │   ├── base.py                          [STEP 3] LLMProvider ABC
+│   │   ├── manager.py                       [STEP 3] Provider selection
+│   │   ├── messages.py                      [STEP 3] Message/ChatRequest types
+│   │   └── providers/
+│   │       ├── __init__.py                  [STEP 3]
+│   │       ├── stub.py                      [STEP 3] Echo provider (dev)
+│   │       └── openai_compatible.py         [STEP 3] HTTP provider (opt-in)
+│   │
+│   ├── language/                            # Language system
+│   │   ├── __init__.py                      [STEP 4]
+│   │   ├── manager.py                       [STEP 4] LanguageManager
+│   │   ├── detector.py                      [STEP 4] Script/heuristic detection
+│   │   ├── profiles.py                      [STEP 4] Per-language config
+│   │   └── languages/
+│   │       ├── __init__.py                  [STEP 4]
+│   │       ├── base.py                      [STEP 4] LanguageProfile ABC
+│   │       ├── tamil.py                     [STEP 4] ta profile
+│   │       └── english.py                   [STEP 4] en profile
+│   │
+│   ├── memory/                              # Long-term + short-term memory
+│   │   ├── __init__.py                      [STEP 6]
+│   │   ├── manager.py                       [STEP 6] MemoryManager facade
+│   │   ├── models.py                        [STEP 6] MemoryRecord, metadata
+│   │   ├── backends/
+│   │   │   ├── __init__.py                  [STEP 6]
+│   │   │   ├── base.py                      [STEP 6] MemoryBackend ABC
+│   │   │   └── sqlite_backend.py            [STEP 6] Default SQLite backend
+│   │   ├── vectors/
+│   │   │   ├── __init__.py                  [STEP 6]
+│   │   │   ├── base.py                      [STEP 6] VectorStore ABC
+│   │   │   ├── embeddings.py                [STEP 6] EmbeddingProvider ABC
+│   │   │   └── null_store.py                [STEP 6] No-op fallback
+│   │   └── conversation/                    # Short-term / session memory
+│   │       ├── __init__.py                  [STEP 5]
+│   │       ├── session.py                   [STEP 5] Session model
+│   │       ├── manager.py                   [STEP 5] SessionManager
+│   │       └── context.py                   [STEP 5] Context-window builder
+│   │
+│   ├── security/                            # Auth + permissions
+│   │   ├── __init__.py                      [STEP 7]
+│   │   ├── modes.py                         [STEP 7] RESTRICTED / CREATOR
+│   │   ├── authenticator.py                 [STEP 7] Authenticator
+│   │   ├── capabilities.py                  [STEP 7] Authenticator
+│   │   ├── methods/
+│   │   │   ├── __init__.py                  [STEP 7]
+│   │   │   ├── base.py                      [STEP 7] AuthMethod ABC
+│   │   │   ├── pin.py                       [STEP 7] PIN method
+│   │   │   ├── device.py                    [STEP 7] Device method
+│   │   │   └── voice.py                     [STEP 7] Voice (stub)
+│   │   └── permissions.py                   [STEP 7] PermissionManager
+│   │
+│   ├── tasks/                               # Async task manager
+│   │   ├── __init__.py                      [STEP 9]
+│   │   ├── manager.py                       [STEP 9] TaskManager
+│   │   ├── task.py                          [STEP 9] Task model + status enum
+│   │   └── scheduler.py                     [STEP 9] Concurrency control
+│   │
+│   ├── search/                              # Web search framework
+│   │   ├── __init__.py                      [STEP 10]
+│   │   ├── manager.py                       [STEP 10] SearchManager
+│   │   ├── models.py                        [STEP 10] Result, Source
+│   │   ├── sanitizer.py                     [STEP 10] Untrusted-input guard
+│   │   └── providers/
+│   │       ├── __init__.py                  [STEP 10]
+│   │       ├── base.py                      [STEP 10] SearchProvider ABC
+│   │       └── null_provider.py             [STEP 10] No-op fallback
+│   │
+│   ├── tools/                               # Tool system
+│   │   ├── __init__.py                      [STEP 8]
+│   │   ├── manager.py                       [STEP 8] ToolManager
+│   │   ├── base.py                          [STEP 8] Tool ABC + metadata
+│   │   ├── schema.py                        [STEP 8] Parameter schemas
+│   │   ├── registry.py                      [STEP 8] Tool discovery
+│   │   └── builtin/
+│   │       ├── __init__.py                  [STEP 8]
+│   │       ├── echo.py                      [STEP 8] Dev tool
+│   │       └── get_time.py                  [STEP 8] Safe sample tool
+│   │
+│   ├── automation/                          # Windows automation
+│   │   ├── __init__.py                      [STEP 11]
+│   │   ├── base.py                          [STEP 11] WindowsAutomation ABC
+│   │   ├── windows.py                       [STEP 11] Real implementation
+│   │   ├── applications.py                  [STEP 11] Launch/close apps
+│   │   ├── input.py                         [STEP 11] Keyboard/mouse
+│   │   ├── windows_mgmt.py                  [STEP 11] Window management
+│   │   ├── files.py                         [STEP 11] File operations
+│   │   ├── screen.py                        [STEP 11] Screenshots
+│   │   └── browser.py                       [STEP 11] Browser control
+│   │   └── policy.py                        [STEP 11] Browser control
+│   │
+│   ├── voice/                               # Voice I/O
+│   │   ├── __init__.py                      [STEP 12]
+│   │   ├── microphone.py                    [STEP 12] Audio capture
+│   │   ├── frames.py                        [STEP 12] Audio capture
+│   │   ├── transcript.py                    [STEP 12] Audio capture
+│   │   ├── input_manager.py                 [STEP 12] Voice vs text router
+│   │   ├── stt/
+│   │   │   ├── __init__.py                  [STEP 12]
+│   │   │   ├── base.py                      [STEP 12] SpeechToTextProvider ABC
+│   │   │   └── null_provider.py             [STEP 12] No-op fallback
+│   │   ├── wake/
+│   │   │   ├── __init__.py                  [STEP 13]
+│   │   │   ├── base.py                      [STEP 13] WakeWordDetector ABC
+│   │   │   ├── manager.py                   [STEP 13] WakeWordManager
+│   │   │   └── null_detector.py             [STEP 13] No-op fallback
+│   │   └── tts/
+│   │       ├── __init__.py                  [STEP 14]
+│   │       ├── base.py                      [STEP 14] TextToSpeechProvider ABC
+│   │       ├── manager.py                   [STEP 14] TTSManager
+│   │       └── null_provider.py             [STEP 14] No-op fallback
+│   │
+│   ├── plugins/                             # Plugin loader
+│   │   ├── __init__.py                      [STEP 16]
+│   │   ├── loader.py                        [STEP 16] Plugin discovery
+│   │   ├── base.py                          [STEP 16] Plugin ABC + manifest
+│   │   ├── manifest.py                      [STEP 16] plugin.json schema
+│   │   └── builtin/
+│   │       └── __init__.py                  [STEP 16] (empty for now)
+│   │
+│   ├── ui/                                  # Desktop interface
+│   │   ├── __init__.py                      [STEP 15]
+│   │   ├── app.py                           [STEP 15] UI entry point
+│   │   ├── bridge.py                        [STEP 15] Backend↔UI API
+│   │   ├── state.py                         [STEP 15] Observable UI state
+│   │   └── components/                      [STEP 15] Widgets/screens
+│   │       └── __init__.py                  [STEP 15]
+│   │
+│   └── config/                              # Settings + logging
+│       ├── __init__.py                      [DONE]
+│       ├── settings.py                      [DONE]
+│       └── logging_setup.py                 [DONE]
+│
+├── data/                                    # Runtime data (gitignored)
+│   ├── memory/                              [auto-created]
+│   │   └── azmuth_memory.db                 [STEP 6]
+│   ├── conversations/                       [auto-created]
+│   ├── users/                               [auto-created]
+│   ├── logs/                                [auto-created]
+│   │   └── azmuth.log                       [DONE]
+│   └── cache/                               [auto-created]
+│
+├── tests/
+│   ├── __init__.py                          [DONE]
+│   ├── conftest.py                          [STEP 2] Shared fixtures
+│   ├── test_configuration.py                [DONE]
+│   ├── test_logging.py                      [DONE]
+│   ├── test_errors.py                       [DONE]
+│   ├── test_events.py                       [STEP 2]
+│   ├── test_container.py                    [STEP 2]
+│   ├── test_registry.py                     [STEP 2]
+│   ├── test_llm.py                          [STEP 3]
+│   ├── test_language.py                     [STEP 4]
+│   ├── test_conversation.py                 [STEP 5]
+│   ├── test_memory.py                       [STEP 6]
+│   ├── test_security.py                     [STEP 7]
+│   ├── test_tools.py                        [STEP 8]
+│   ├── test_tasks.py                        [STEP 9]
+│   ├── test_search.py                       [STEP 10]
+│   ├── test_automation.py                   [STEP 11]
+│   ├── test_voice.py                        [STEP 12–14]
+│   ├── test_plugins.py                      [STEP 16]
+│   └── test_integration.py                  [STEP 17]
+│
+├── main.py                                  [DONE]
+├── requirements.txt                         [DONE]
+├── requirements-dev.txt                     [DONE]
+├── pyproject.toml                           [DONE]
+├── .env.example                             [DONE]
+├── .gitignore                               [DONE]
+└── README.md                                [DONE]

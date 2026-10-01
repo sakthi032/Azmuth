@@ -1,0 +1,9 @@
+{
+  "name": "uppercase",
+  "version": "1.0.0",
+  "description": "A sample plugin that converts text to uppercase. Demonstrates the plugin API.",
+  "author": "Azmuth",
+  "min_azmuth_version": "0.1.0",
+  "required_capabilities": ["chat"],
+  "entry_point": "plugin.py:UppercasePlugin"
+}

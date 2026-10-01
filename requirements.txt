@@ -1,0 +1,7 @@
+# requirements.txt
+# Runtime dependencies — Phase 1 (STEP 1: bootstrap only).
+#
+# Kept deliberately small. Further dependencies are added in the step that
+# actually needs them, and heavy/AI-specific packages (torch, faiss, chromadb,
+# speech engines, …) stay optional extras behind provider interfaces.
+python-dotenv==1.0.1

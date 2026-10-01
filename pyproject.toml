@@ -1,0 +1,46 @@
+# Azmuth is an application, not a distributable package. This file exists
+# so pytest resolves imports from the repo root and so coverage, markers,
+# and timeouts are declared in one place.
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q -ra --strict-markers --strict-config"
+markers = [
+    "integration: end-to-end tests that wire multiple subsystems",
+    "concurrency: async interaction between tasks, voice, and text",
+    "adversarial: security-focused tests for untrusted input handling",
+    "windows: Windows-specific behaviour (skipped on other platforms)",
+    "slow: takes more than a second; excluded by default in CI",
+]
+# Tests are expected to finish quickly; anything over 60s is a hang.
+timeout = 60
+# Logging is captured by default; this surfaces the last 5 failed-test
+# records inline, which is often enough to diagnose without a rerun.
+log_cli = false
+filterwarnings = [
+    "error::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = [
+    "app/ui/app.py",           # tkinter shell — exercised via smoke test only
+    "app/ui/components/*",     # tkinter widgets — need a display
+    "app/**/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "\\.\\.\\.",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
