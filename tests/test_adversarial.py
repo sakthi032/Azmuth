@@ -239,44 +239,6 @@ def test_anonymous_principal_does_not_recall_memory(make_azmuth) -> None:
     assert response.used_memory is False
 
 
-# ---------------------------------------------------------------------------
-# System prompt separation
-# ---------------------------------------------------------------------------
-@pytest.mark.adversarial
-@pytest.mark.integration
-def test_retrieval_context_is_never_merged_with_system_prompt(make_azmuth) -> None:
-    """Memory and search results arrive as *separate* system messages."""
-    azmuth = make_azmuth(
-        responses="answer",
-        search_results=[
-            SearchResult(
-                title="t", url="https://x", snippet="snippet body", source="t",
-            )
-        ],
-    )
-    inputs = InputManager(azmuth.language)
-
-    _run(azmuth.respond(inputs.from_text("What's the weather today?")))
-
-    llm = azmuth._test_llm
-    messages = llm.calls[0].messages
-    # At least two system messages: the app prompt and the reference block.
-    system_messages = [m for m in messages if m.role is Role.SYSTEM]
-    assert len(system_messages) >= 2
-    # The app prompt does not contain the retrieved snippet.
-    app_prompt = next(
-        m for m in system_messages if "## Language" in m.content
-    )
-    assert "snippet body" not in app_prompt.content
-    # The snippet lives in its own message, clearly marked by the
-    # ContextBuilder's ``[reference]`` label — not the word "REFERENCE"
-    # in the app prompt's instructions.
-    reference = next(
-        m for m in system_messages if m.content.startswith("[reference]")
-    )
-    assert "snippet body" in reference.content
-    # And the app prompt itself is untouched by the retrieved content.
-    assert "snippet body" not in app_prompt.content
 
 
 # ---------------------------------------------------------------------------
@@ -338,3 +300,66 @@ def test_plugin_manifest_with_unknown_capability_is_rejected(tmp_path) -> None:
 
     with pytest.raises(ConfigurationError, match="unknown capability"):
         parse_manifest(manifest)
+        
+
+@pytest.mark.adversarial
+@pytest.mark.integration
+def test_search_result_enters_as_a_separate_message(make_azmuth) -> None:
+    """A search tool result must never be merged into the app prompt.
+
+    Under the AI-driven design, search fires because the model calls
+    ``search_web``. The test scripts that call and then asserts the
+    retrieved snippet appears in its own message, never inside the
+    system prompt that defines Azmuth's identity, language, and rules.
+    """
+    call = (
+        '```tool\n'
+        '{"name": "search_web", "arguments": {"query": "weather today"}}\n'
+        '```'
+    )
+
+    azmuth = make_azmuth(
+        responses=[call, "It will be sunny."],
+        search_results=[
+            SearchResult(
+                title="Weather today",
+                url="https://example.com/weather",
+                snippet="snippet body",
+                source="test",
+            )
+        ],
+    )
+    inputs = InputManager(azmuth.language)
+
+    response = _run(azmuth.respond(inputs.from_text("What's the weather today?")))
+    assert response.text == "It will be sunny."
+
+    llm = azmuth._test_llm
+    second_turn = llm.calls[1].messages
+
+    # Find the app prompt. It is the one and only message whose content
+    # starts with the identity block loaded from data/identity/*.md and
+    # contains the "## Language" section header.
+    app_prompts = [
+        m for m in second_turn if "## Language" in m.content
+    ]
+    assert app_prompts, "app prompt not found in the message stream"
+
+    for prompt in app_prompts:
+        assert "snippet body" not in prompt.content, (
+            "retrieved search snippet leaked into the app prompt"
+        )
+
+    # The snippet must appear *somewhere* — the model needs it to answer.
+    snippet_messages = [
+        m for m in second_turn if "snippet body" in m.content
+    ]
+    assert snippet_messages, "search snippet never reached the model"
+
+    # And the app prompt must be a *different* message from the one that
+    # carries the snippet — never the same message.
+    app_prompt_ids = {id(m) for m in app_prompts}
+    snippet_ids = {id(m) for m in snippet_messages}
+    assert app_prompt_ids.isdisjoint(snippet_ids), (
+        "snippet was merged into the app prompt"
+    )

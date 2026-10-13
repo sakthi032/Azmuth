@@ -28,7 +28,9 @@ from app.llm.messages import (
     ChatRequest,
     ChatResponse,
     ModelInfo,
+    Role,
     StreamChunk,
+    ToolCallRequest,
     Usage,
 )
 
@@ -116,11 +118,16 @@ class OpenAICompatibleProvider(LLMProvider):
     
 
     def _build_body(self, request: ChatRequest, *, stream: bool) -> dict[str, Any]:
+        messages: list[dict[str, Any]] = []
+        for m in request.messages:
+            entry: dict[str, Any] = {"role": m.role.value, "content": m.content}
+            if m.role is Role.TOOL and m.tool_call_id:
+                entry["tool_call_id"] = m.tool_call_id
+            messages.append(entry)
+
         body: dict[str, Any] = {
             "model": request.model or self.model,
-            "messages": [
-                {"role": m.role.value, "content": m.content} for m in request.messages
-            ],
+            "messages": messages,
             "temperature": request.temperature,
             "stream": stream,
         }
@@ -128,6 +135,9 @@ class OpenAICompatibleProvider(LLMProvider):
             body["max_tokens"] = request.max_tokens
         if request.stop:
             body["stop"] = list(request.stop)
+        if request.tools:
+            body["tools"] = [t.to_openai() for t in request.tools]
+            body["tool_choice"] = "auto"
         return body
 
     def _post_json(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -177,7 +187,6 @@ class OpenAICompatibleProvider(LLMProvider):
         except urllib.error.URLError as exc:
             raise ProviderUnavailableError(f"LLM request failed: {exc.reason}") from exc
 
-    # -- parsing -----------------------------------------------------------
     def _parse_chat_response(
         self, payload: dict[str, Any], request: ChatRequest, latency_ms: float
     ) -> ChatResponse:
@@ -200,6 +209,35 @@ class OpenAICompatibleProvider(LLMProvider):
             else None
         )
 
+        raw_calls = message.get("tool_calls") or []
+        tool_calls: list[ToolCallRequest] = []
+        for rc in raw_calls:
+            if not isinstance(rc, dict):
+                continue
+            fn = rc.get("function") or {}
+            name = fn.get("name") or ""
+            if not isinstance(name, str) or not name.strip():
+                continue
+            args_raw = fn.get("arguments")
+            if isinstance(args_raw, str):
+                try:
+                    args = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    args = {}
+            elif isinstance(args_raw, dict):
+                args = args_raw
+            else:
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+            tool_calls.append(
+                ToolCallRequest(
+                    id=str(rc.get("id") or ""),
+                    name=name.strip(),
+                    arguments=args,
+                )
+            )
+
         return ChatResponse(
             content=content,
             model=payload.get("model") or (request.model or self.model),
@@ -207,6 +245,7 @@ class OpenAICompatibleProvider(LLMProvider):
             finish_reason=choice.get("finish_reason"),
             usage=usage,
             latency_ms=latency_ms,
+            tool_calls=tuple(tool_calls),
         )
 
     @staticmethod

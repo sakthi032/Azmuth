@@ -118,7 +118,9 @@ DEFAULT_POLICY: dict[Capability, CapabilityPolicy] = {
         PermissionMode.CREATOR, description="Developer tooling."
     ),
     Capability.ADVANCED_AUTOMATION: CapabilityPolicy(
-        PermissionMode.CREATOR, description="Advanced device automation."
+        PermissionMode.CREATOR,
+        requires_confirmation=True,
+        description="Advanced device automation. Creator + confirmation required.",
     ),
 
     # ---- creator-only, destructive ----

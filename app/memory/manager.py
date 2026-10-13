@@ -300,11 +300,49 @@ def build_memory_manager(
 ) -> MemoryManager:
     """Construct a memory manager using the configured backend.
 
-    Embeddings and vectors default to their null implementations — semantic
-    recall is unavailable until a real provider is supplied. That keeps
-    Phase 1 dependency-free and honest.
+    Backend selection comes from ``MEMORY_BACKEND`` in ``.env``:
+
+    * ``sqlite`` (default) - a local file, no server required.
+    * ``postgres`` - a PostgreSQL database. Requires ``POSTGRES_*``
+      settings and the ``psycopg[binary,pool]`` package.
     """
-    backend: MemoryBackend = SqliteMemoryBackend(settings.memory_database)
+    backend_name = (settings.memory_backend or "sqlite").lower()
+
+    if backend_name == "postgres":
+        from app.memory.backends.postgres_backend import PostgresMemoryBackend
+
+        backend: MemoryBackend = PostgresMemoryBackend(
+            host=settings.postgres_host,
+            port=settings.postgres_port,
+            database=settings.postgres_database,
+            user=settings.postgres_user,
+            password=settings.postgres_password,
+            schema=settings.postgres_schema,
+        )
+        logger.info(
+            "memory backend initialised",
+            extra={
+                "event": "MEMORY_BACKEND_READY",
+                "backend": "postgres",
+                "database": settings.postgres_database,
+            },
+        )
+    elif backend_name == "sqlite":
+        backend = SqliteMemoryBackend(settings.memory_database)
+        logger.info(
+            "memory backend initialised",
+            extra={
+                "event": "MEMORY_BACKEND_READY",
+                "backend": "sqlite",
+                "path": str(settings.memory_database),
+            },
+        )
+    else:
+        raise MemoryStoreError(
+            f"unknown MEMORY_BACKEND {backend_name!r}. "
+            f"Supported: 'sqlite', 'postgres'."
+        )
+
     return MemoryManager(
         settings,
         backend,

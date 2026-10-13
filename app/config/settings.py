@@ -147,10 +147,26 @@ class Settings:
     memory_backend: str
     memory_database: str
     embedding_provider: str
+    postgres_host: str
+    postgres_port: int
+    postgres_database: str
+    postgres_user: str
+    postgres_password: str
+    postgres_schema: str
+    # ---- PostgreSQL (used when memory_backend == "postgres") -----------
+    postgres_host: str
+    postgres_port: int
+    postgres_database: str
+    postgres_user: str
+    postgres_password: str
+    postgres_schema: str
 
     # ---- Security -------------------------------------------------------
     creator_auth_method: str
 
+    # ---- File sandbox ---------------------------------------------------
+    file_sandbox_roots: tuple[str, ...]
+    
     # ---- Session / tasks ------------------------------------------------
     session_max_turns: int
     session_ttl_minutes: int
@@ -193,6 +209,13 @@ class Settings:
             "embedding_provider": self.embedding_provider,
             "creator_auth_method": self.creator_auth_method,
             "paths": self.paths.as_dict(),
+            "postgres_host": self.postgres_host,
+            "postgres_port": self.postgres_port,
+            "postgres_database": self.postgres_database,
+            "postgres_user": self.postgres_user,
+            "postgres_password": "***redacted***" if self.postgres_password else None,
+            "postgres_schema": self.postgres_schema,
+            "file_sandbox_roots": list(self.file_sandbox_roots),
         }
 
 
@@ -413,6 +436,15 @@ def load_settings(
             env, "TASK_MAX_CONCURRENT", 4, minimum=1
         ),
         paths=paths,
+        postgres_host=_get_str(env, "POSTGRES_HOST", "localhost") or "localhost",
+        postgres_port=_get_int(env, "POSTGRES_PORT", 3207, minimum=1, maximum=65535),
+        postgres_database=_get_str(env, "POSTGRES_DATABASE", "azmuth") or "azmuth",
+        postgres_user=_get_str(env, "POSTGRES_USER", "postgres") or "postgres",
+        postgres_password=_get_str(env, "POSTGRES_PASSWORD", "") or "",
+        postgres_schema=_get_str(env, "POSTGRES_SCHEMA", "public") or "public",
+        file_sandbox_roots=tuple(
+            _get_csv(env, "FILE_SANDBOX_ROOTS")
+        ) or (str(_PROJECT_ROOT), str(Path.home())),
     )
 
     if default_language not in supported:

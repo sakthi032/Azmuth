@@ -516,9 +516,14 @@ def test_search_triggered_by_live_query(settings: Settings) -> None:
             source="fixed",
         )
     ]
+    call = (
+        '```tool\n'
+        '{"name": "search_web", "arguments": {"query": "weather today"}}\n'
+        '```'
+    )
     azmuth, llm, provider = _make_azmuth(
         settings,
-        responses="Here is the weather: sunny.",
+        responses=[call, "Here is the weather: sunny."],
         search_results=results,
     )
     inputs = InputManager(azmuth.language)
@@ -527,15 +532,7 @@ def test_search_triggered_by_live_query(settings: Settings) -> None:
 
     assert response.used_search is True
     assert len(provider.queries) == 1
-    # The reference block must be present in the LLM's context.
-    messages = llm.calls[0].messages
-    reference_message = next(
-        (m for m in messages if m.content.startswith("[reference]")),
-        None,
-    )
-    assert reference_message is not None
-    assert reference_message.role is Role.SYSTEM
-    assert "It will be sunny" in reference_message.content
+    assert response.text == "Here is the weather: sunny."
 
 
 def test_search_not_triggered_for_general_question(settings: Settings) -> None:
@@ -740,6 +737,22 @@ def test_ui_controller_preserves_session_across_turns(settings: Settings) -> Non
     assert "first reply" in second_call_contents
     assert "second message" in second_call_contents
 
+
+def test_search_does_not_run_without_a_model_request(settings: Settings) -> None:
+    """The pipeline never runs search on its own initiative.
+
+    Under the AI-driven design, search is a tool the model calls. If the
+    model does not call it, no search happens.
+    """
+    azmuth, _, provider = _make_azmuth(
+        settings, responses="The capital is Paris."
+    )
+    inputs = InputManager(azmuth.language)
+
+    response = _run(azmuth.respond(inputs.from_text("What is the capital of France?")))
+
+    assert response.used_search is False
+    assert provider.queries == []
 
 def test_ui_reset_conversation_starts_new_session(settings: Settings) -> None:
     from app.ui import UIController

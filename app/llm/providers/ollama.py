@@ -50,10 +50,11 @@ class OllamaProvider(OpenAICompatibleProvider):
     def is_available(self) -> bool:
         """Config-only check.
 
-        Whether the daemon is running and the model is pulled is
-        discovered at request time, not here. A fast return keeps the
-        router snappy; a genuinely offline Ollama fails the request and
-        the pipeline falls back.
+        Whether the daemon is running is discovered at request time,
+        not here. A fast return keeps the router snappy; a genuinely
+        offline Ollama fails the request and the router falls through
+        to whatever tier comes next (there is nothing after tier 3, so
+        the turn reports a clean "all providers failed" error).
         """
         return bool(self._base_url) and bool(self._model)
 

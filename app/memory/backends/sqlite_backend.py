@@ -93,8 +93,14 @@ class SqliteMemoryBackend(MemoryBackend):
         # `check_same_thread=False` footguns.
         self._lock = threading.RLock()
         try:
-            self._conn = sqlite3.connect(str(self._path))
-        except sqlite3.Error as exc:  # pragma: no cover - defensive
+            # ``check_same_thread=False`` tells SQLite not to enforce
+            # same-thread access. The RLock below is what actually
+            # serialises access — SQLite is not thread-safe for
+            # concurrent writes, so the lock is required, not optional.
+            self._conn = sqlite3.connect(
+                str(self._path), check_same_thread=False
+            )
+        except sqlite3.Error as exc:
             raise MemoryStoreError(
                 f"could not open memory database at {self._path}: {exc}"
             ) from exc

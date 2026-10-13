@@ -76,6 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run_ui(settings: Settings) -> int:
     from app.brain import build_azmuth
     from app.language import build_language_manager
+    from app.security import CreatorCredentialStore, PINMethod
     from app.ui.app import AzmuthDesktopApp
     from app.ui.bridge import UIController
 
@@ -83,12 +84,49 @@ def _run_ui(settings: Settings) -> int:
     azmuth = build_azmuth(settings)
     asyncio.run(azmuth.startup())
 
-    # respond_as_text already matches the Responder protocol:
-    #     (UserInput, str | None) -> Awaitable[tuple[str, str]]
-    controller = UIController(language=language, responder=azmuth.respond_as_text)
+    # Ensure the credential store has a PIN. If it doesn't, prompt once
+    # in the console. This is the only console touch in the whole UI
+    # path, and it only fires on first launch.
+    credentials = CreatorCredentialStore(
+        settings.paths.users / "creator_credentials.json"
+    )
+    if not credentials.has_pin():
+        print("First run: set a creator PIN.")
+        import getpass
+        pin = getpass.getpass("Choose a PIN (min 4 digits): ").strip()
+        if len(pin) < 4:
+            print("PIN too short. Aborting.", file=sys.stderr)
+            return 3
+        credentials.set_pin(pin)
+        # Register it with the authenticator this session.
+        from app.security import Authenticator
+        azmuth._authenticator.register(
+            PINMethod(hashed_pin=credentials.pin_hash() or "")
+        )
+        print("PIN stored. You can log in from the UI.")
+    else:
+        from app.security import PINMethod as _PIN
+        azmuth._authenticator.register(
+            _PIN(hashed_pin=credentials.pin_hash() or "")
+        )
+
+    # The responder is a closure so it can pass the confirmer that the
+    # UI installs after the window is built.
+    async def responder(user_input, conversation_id, confirmer):
+        return await azmuth.respond_as_text(
+            user_input,
+            conversation_id,
+            confirmer=confirmer,
+        )
+
+    controller = UIController(language=language, responder=responder)
 
     try:
-        app = AzmuthDesktopApp(controller)
+        app = AzmuthDesktopApp(
+            controller,
+            authenticator=azmuth._authenticator,
+            brain=azmuth.brain,
+        )
         app.run()
     except RuntimeError as exc:
         print(f"Could not open the desktop UI: {exc}", file=sys.stderr)
@@ -99,7 +137,6 @@ def _run_ui(settings: Settings) -> int:
         except Exception:  # noqa: BLE001
             pass
     return 0
-
 
 # --------------------------------------------------------------------------
 # Chat (developer fallback; not the intended interface)

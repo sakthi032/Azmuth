@@ -226,7 +226,7 @@ def test_ui_refuses_concurrent_sends_without_corrupting_state(
 
     async def scenario() -> tuple[str, str]:
         # A responder that pauses, forcing the controller into busy state.
-        async def slow(user_input, session_id):
+        async def slow(user_input, session_id, _confirmer=None):
             await asyncio.sleep(0.05)
             return f"reply to {user_input.text}", session_id or "s1"
 

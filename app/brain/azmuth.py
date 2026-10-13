@@ -1,26 +1,25 @@
+
 """The top-level facade.
 
 Owns one instance of every subsystem, wires them, and exposes:
 
-* :meth:`Azmuth.respond` — the pipeline entry point used by the UI.
-* :meth:`Azmuth.status` — subsystem health for the status bar.
-* :meth:`Azmuth.shutdown` — best-effort release of resources.
+* :meth:`Azmuth.respond` - the pipeline entry point used by the UI.
+* :meth:`Azmuth.status` - subsystem health for the status bar.
+* :meth:`Azmuth.shutdown` - best-effort release of resources.
 
 Construction is via :func:`build_azmuth`. Every dependency is a keyword
 argument so tests can substitute any subsystem without subclassing.
-The factory builds the defaults (settings-driven) and lets callers
-override any of them.
 """
 
 from __future__ import annotations
 
 import asyncio
 
-from app.brain.pipeline import Brain, BrainResponse
+from app.brain.pipeline import Brain, BrainResponse, Confirmer
 from app.config.logging_setup import get_logger
 from app.config.settings import Settings
 from app.core.events import EventBus
-from app.llm import LLMManager, build_llm_registry
+from app.llm import LLMManager, LLMRouter, ModelPurpose, build_default_registry, build_llm_registry
 from app.llm.base import LLMProvider
 from app.memory import build_memory_manager
 from app.memory.conversation.manager import SessionManager
@@ -44,16 +43,6 @@ from app.voice import (
 from app.voice.input_manager import UserInput
 
 
-from app.core.errors import ProviderUnavailableError
-from app.llm import (
-    LLMManager,
-    LLMRouter,
-    ModelPurpose,
-    build_default_registry,
-    build_llm_registry,
-)
-from app.llm.providers import OllamaProvider  # noqa: F401  (for discoverability)
-
 
 logger = get_logger("brain.azmuth")
 
@@ -66,7 +55,7 @@ class Azmuth:
         *,
         settings: Settings,
         event_bus: EventBus,
-        language,               # LanguageManager
+        language,
         llm_provider: LLMProvider,
         memory: MemoryManager,
         sessions: SessionManager,
@@ -109,7 +98,7 @@ class Azmuth:
         return self._event_bus
 
     @property
-    def language(self):  # noqa: ANN201
+    def language(self):
         return self._language
 
     @property
@@ -163,30 +152,29 @@ class Azmuth:
         *,
         conversation_id: str | None = None,
         principal: Principal | None = None,
+        confirmer: Confirmer | None = None,
     ) -> BrainResponse:
         """Process one user turn."""
         return await self._brain.respond(
             user_input,
             conversation_id=conversation_id,
             principal=principal,
+            confirmer=confirmer,
         )
 
     async def respond_as_text(
         self,
         user_input: UserInput,
         conversation_id: str | None = None,
+        confirmer: Confirmer | None = None,
         *,
         principal: Principal | None = None,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str, str]:
         """UI responder: return ``(reply_text, session_id)``.
 
-        The session id is returned so the caller can pass it back on the
-        next turn — that is what makes short-term memory persist across
-        turns through the desktop UI.
-
-        When ``principal`` is not given, the current principal from the
-        authenticator is used, so the UI automatically gets the right
-        mode (restricted vs creator) without holding its own copy.
+        ``confirmer`` is positional-or-keyword so the UI's bridge can pass
+        it positionally. When omitted, dangerous tools with a
+        confirmation requirement are refused by the pipeline.
         """
         if principal is None:
             principal = self._authenticator.current_principal
@@ -194,9 +182,9 @@ class Azmuth:
             user_input,
             conversation_id=conversation_id,
             principal=principal,
+            confirmer=confirmer,
         )
-        return response.text, response.session_id
-        
+        return response.text, response.session_id, response.model, response.provider
 
     # -- lifecycle ---------------------------------------------------------
     async def startup(self) -> None:
@@ -205,23 +193,21 @@ class Azmuth:
         self._started = True
         await self._plugins.startup()
 
-        # Detect location once. Best-effort; failure is logged and the
-        # prompt simply omits the location line.
+        # Start the Chrome extension bridge. Best-effort.
         try:
-            self._brain._location_service and self._brain._location_service.detect()
-        except Exception:  # noqa: BLE001
-            logger.exception("location detection failed")
-        # Warm up cloud models so the user's first request is fast.
-        # This is a no-op when no router is configured.
+            from app.automation.chrome_extension_bridge import get_bridge
+            get_bridge()
+        except Exception:
+            logger.exception("chrome extension bridge failed to start")
+
         if self._brain._llm_router is not None:
             try:
                 await self._brain._llm_router.warmup()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("model warmup failed")
         logger.info("azmuth started", extra={"event": "AZMUTH_STARTED"})
 
     async def shutdown(self) -> None:
-        """Release resources. Safe to call more than once."""
         try:
             await self._plugins.shutdown()
         except Exception:  # noqa: BLE001
@@ -234,7 +220,6 @@ class Azmuth:
 
     # -- status ------------------------------------------------------------
     def status(self) -> StatusSnapshot:
-        """Subsystem health for the UI status bar."""
         return StatusSnapshot(
             llm="online" if self._safe(self._llm_provider.is_available) else "offline",
             memory="online",
@@ -252,7 +237,7 @@ class Azmuth:
         )
 
     @staticmethod
-    def _safe(probe) -> bool:  # noqa: ANN001
+    def _safe(probe) -> bool:
         try:
             return bool(probe())
         except Exception:  # noqa: BLE001
@@ -281,12 +266,7 @@ def build_azmuth(
     authenticator: Authenticator | None = None,
     plugin_manager: PluginManager | None = None,
 ) -> Azmuth:
-    """Build an :class:`Azmuth` with all subsystems wired.
-
-    Every argument is optional; omitted ones are constructed from
-    ``settings``. Tests use the overrides to substitute fakes for
-    specific subsystems without replacing the whole wiring.
-    """
+    """Build an :class:`Azmuth` with all subsystems wired."""
     from app.language import build_language_manager
 
     settings.paths.ensure()
@@ -298,22 +278,16 @@ def build_azmuth(
     perms = permissions or PermissionManager()
     auth = authenticator or Authenticator()
     if authenticator is None:
-        # Register the standard methods. The PIN method is unavailable
-        # until a credential is stored — which is the honest default.
         from app.security import build_default_methods
         auth.register_all(build_default_methods())
 
     # ---- LLM -------------------------------------------------------------
     router: LLMRouter | None = None
     if llm_provider is None:
-        # Build a router over the models Azmuth knows about, then hand it
-        # to the manager. The manager resolves a provider per request.
+        from app.core.errors import ProviderUnavailableError
         registry = build_default_registry()
         router = LLMRouter(settings, registry)
         llm_manager = LLMManager(settings, build_llm_registry(), router=router)
-        # Try to get a working provider; if the router has nothing available
-        # (e.g. Ollama not running and no NVIDIA key), fall back to the
-        # stub so the app still boots rather than crashing at startup.
         try:
             llm_provider = router.for_purpose(ModelPurpose.CHAT)
         except ProviderUnavailableError:
@@ -327,7 +301,7 @@ def build_azmuth(
     mem = memory or build_memory_manager(settings)
     sess = sessions or SessionManager(settings)
 
-    # ---- search (built first so tools can use it) ------------------------
+    # ---- search ----------------------------------------------------------
     search_manager = search or build_search_manager(settings.search_provider)
 
     # ---- automation ------------------------------------------------------
@@ -349,11 +323,26 @@ def build_azmuth(
                     "failures": load_report.failure_count,
                 },
             )
-
-    # Register builtin tools + plugin tools on the same manager.
     if tools is None:
+        from app.automation.input import InputController
+        from app.automation.settings import SettingsController
+        from app.automation.uia import UIAutomationController
+
+        from app.automation.files import FileController
+        from app.automation.policy import PathPolicy
+
+        file_policy = PathPolicy.from_paths(settings.file_sandbox_roots)
+        file_controller = FileController(file_policy)
+
         for tool in build_builtin_tools(
-            search=search_manager, automation=automation
+            search=search_manager,
+            automation=automation,
+            settings=SettingsController(),
+            uia=UIAutomationController(),
+            input_ctl=InputController(),
+            files=file_controller,
+            include_browsers=True,
+            include_extension=True,
         ):
             tool_manager.register(tool)
         plugins.register_tools(tool_manager)
@@ -375,15 +364,11 @@ def build_azmuth(
         settings.task_max_concurrent, event_bus=bus
     )
 
-    # The brain uses the router for per-request model selection. When no
-    # router was constructed (e.g. a test passed llm_provider directly),
-    # the router is None and every request goes to the single provider.
-    router_for_brain: LLMRouter | None = locals().get("router")
     # ---- identity & location --------------------------------------------
     from app.brain.context import LocationService
     from app.brain.identity import ensure_identity_dir, load_identity_block
 
-    ensure_identity_dir(settings)  # create starter files if first run
+    ensure_identity_dir(settings)
     identity_block = load_identity_block(settings)
     location_service = LocationService()
 
@@ -403,8 +388,7 @@ def build_azmuth(
         location_service=location_service,
     )
 
-    del principal  # reserved for future use
-
+    del principal
     return Azmuth(
         settings=settings,
         event_bus=bus,
@@ -426,13 +410,12 @@ def build_azmuth(
 
 
 def run_azmuth_blocking(settings: Settings) -> int:  # pragma: no cover
-    """Convenience for scripts: run startup/shutdown around an async block."""
     azmuth = build_azmuth(settings)
 
     async def _main() -> None:
         await azmuth.startup()
         try:
-            await asyncio.sleep(0)  # caller's work would go here
+            await asyncio.sleep(0)
         finally:
             await azmuth.shutdown()
 

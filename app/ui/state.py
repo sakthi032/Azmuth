@@ -1,14 +1,5 @@
-"""Observable UI state.
 
-Pure data plus listener plumbing. **No tkinter import anywhere in this
-module** — the state is what tests exercise, and it must be importable
-without a display, on any platform, in CI.
-
-The pattern is deliberately simple: mutations bump ``revision`` and
-notify listeners; widgets subscribe and redraw rather than poll. That is
-enough for a UI that is updated by event-bus messages and by the
-controller, and it avoids a framework dependency.
-"""
+"""Observable UI state."""
 
 from __future__ import annotations
 
@@ -23,16 +14,12 @@ def _now() -> datetime:
 
 
 class Speaker(str, Enum):
-    """Who produced a message in the transcript."""
-
     USER = "user"
     AZMUTH = "azmuth"
     SYSTEM = "system"
 
 
 class LogLevel(str, Enum):
-    """Severity of a system message in the transcript."""
-
     INFO = "info"
     WARNING = "warning"
     ERROR = "error"
@@ -48,14 +35,11 @@ class ConversationEntry:
     language: str | None = None
     source: str = "text"
     level: LogLevel = LogLevel.INFO
+    model: str = ""
+    provider: str = ""
     created_at: datetime = field(default_factory=_now)
 
     def __post_init__(self) -> None:
-        # Coerce strings to the enum. Both Speaker and LogLevel subclass
-        # ``str``, so ``==`` works against the string form, but ``is``
-        # does not. Callers should be able to pass "error" and get
-        # LogLevel.ERROR — same convention as Message.role in
-        # app.llm.messages.
         if not isinstance(self.speaker, Speaker):
             object.__setattr__(self, "speaker", Speaker(self.speaker))
         if not isinstance(self.level, LogLevel):
@@ -69,17 +53,17 @@ class ConversationEntry:
             "language": self.language,
             "source": self.source,
             "level": self.level.value,
+            "model": self.model,
+            "provider": self.provider,
             "created_at": self.created_at.isoformat(),
         }
 
 
 @dataclass(frozen=True, slots=True)
 class TaskSummary:
-    """A background task as the UI cares about it."""
-
     id: str
     name: str
-    status: str                    # mirrors TaskStatus values
+    status: str
     progress: float | None = None
     message: str | None = None
     created_at: datetime = field(default_factory=_now)
@@ -100,13 +84,6 @@ class TaskSummary:
 
 @dataclass(frozen=True, slots=True)
 class StatusSnapshot:
-    """Subsystem health as reported to the UI.
-
-    Field names mirror the spec's status block:
-    ``LLM / MEMORY / VOICE INPUT / TTS / WAKE WORD / SEARCH / TASK MANAGER
-    / SECURITY / UI``.
-    """
-
     llm: str = "unknown"
     memory: str = "unknown"
     voice_input: str = "unknown"
@@ -135,13 +112,7 @@ Listener = Callable[["UIState"], None]
 
 
 class UIState:
-    """The mutable state the UI observes.
-
-    Not frozen — a UI is inherently a stateful thing. Every mutating
-    method bumps :attr:`revision` and notifies listeners. Listeners must
-    not raise; a broken listener is dropped silently so one bad widget
-    cannot wedge the interface.
-    """
+    """The mutable state the UI observes."""
 
     def __init__(self) -> None:
         self._conversation: list[ConversationEntry] = []
@@ -189,7 +160,6 @@ class UIState:
 
     # -- subscription ------------------------------------------------------
     def subscribe(self, listener: Listener) -> Callable[[], None]:
-        """Register ``listener``. Returns an unsubscribe function."""
         self._listeners.append(listener)
         return lambda: self._remove_listener(listener)
 
@@ -201,11 +171,10 @@ class UIState:
 
     def _touch(self) -> None:
         self._revision += 1
-        # Iterate a snapshot so a listener may unsubscribe during dispatch.
         for listener in tuple(self._listeners):
             try:
                 listener(self)
-            except Exception:  # noqa: BLE001 — one bad widget must not wedge the UI
+            except Exception:  # noqa: BLE001
                 self._listeners.remove(listener)
 
     # -- transcript --------------------------------------------------------
@@ -224,8 +193,14 @@ class UIState:
         *,
         language: str | None = None,
         source: str = "text",
+        model: str = "",
+        provider: str = "",
     ) -> ConversationEntry:
-        return self._append(Speaker.AZMUTH, text, language=language, source=source)
+        return self._append(
+            Speaker.AZMUTH, text,
+            language=language, source=source,
+            model=model, provider=provider,
+        )
 
     def add_system_message(
         self, text: str, *, level: LogLevel = LogLevel.INFO
@@ -240,6 +215,8 @@ class UIState:
         language: str | None = None,
         source: str = "text",
         level: LogLevel = LogLevel.INFO,
+        model: str = "",
+        provider: str = "",
     ) -> ConversationEntry:
         entry = ConversationEntry(
             id=self._next_id,
@@ -248,6 +225,8 @@ class UIState:
             language=language,
             source=source,
             level=level,
+            model=model,
+            provider=provider,
         )
         self._next_id += 1
         self._conversation.append(entry)
@@ -306,7 +285,6 @@ class UIState:
 
     # -- status ------------------------------------------------------------
     def set_status(self, **fields: str) -> None:
-        """Update one or more status fields. Unknown keys are ignored."""
         self._status = replace(self._status, **fields)
         self._touch()
 

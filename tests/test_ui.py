@@ -405,9 +405,13 @@ def test_stub_responder_echoes() -> None:
     user_input = UserInput(
         text="hello", language="en", source=InputSource.TEXT,
     )
-    reply, session_id = _run(responder(user_input))
+    reply, session_id, model, provider = _run(
+        responder(user_input, None, None)
+    )
     assert reply == "[stub] hello"
     assert session_id == "stub-session"
+    assert model == "stub"
+    assert provider == "stub"
 
 
 # ---------------------------------------------------------------------------
@@ -435,7 +439,7 @@ def test_controller_send_text_empty_returns_empty(language) -> None:
 
 
 def test_controller_send_text_while_busy_refuses(language) -> None:
-    async def slow(_input, _session):  # noqa: ANN001
+    async def slow(_input, _session, _confirmer):  # noqa: ANN001
         await asyncio.sleep(0.05)
         return "done", "s1"
 
@@ -458,7 +462,7 @@ def test_controller_send_text_while_busy_refuses(language) -> None:
 
 
 def test_controller_responder_failure_is_contained(language) -> None:
-    async def broken(_input, _session):  # noqa: ANN001
+    async def broken(_input, _session, _confirmer):  # noqa: ANN001
         raise RuntimeError("model down")
 
     controller = UIController(language=language, responder=broken)
@@ -473,14 +477,14 @@ def test_controller_responder_failure_is_contained(language) -> None:
 
 
 def test_controller_is_not_busy_after_failure(language) -> None:
-    async def broken(_input, _session):  # noqa: ANN001
+    async def broken(_input, _session, _confirmer):  # noqa: ANN001
         raise RuntimeError("x")
 
     controller = UIController(language=language, responder=broken)
     _run(controller.send_text("a"))
     assert controller.is_busy is False
 
-    async def ok(_input, _session):  # noqa: ANN001
+    async def ok(_input, _session, _confirmer):  # noqa: ANN001
         return "fine", "s1"
     controller._responder = ok
     assert _run(controller.send_text("b")) == "fine"
@@ -507,7 +511,7 @@ def test_controller_add_voice_input(language) -> None:
 def test_controller_voice_and_text_share_responder(language) -> None:
     seen: list[str] = []
 
-    async def responder(user_input, _session):  # noqa: ANN001
+    async def responder(user_input, _session, _confirmer):  # noqa: ANN001
         seen.append(user_input.source.value)
         return f"reply to {user_input.text}", "s1"
 
@@ -566,17 +570,35 @@ def test_controller_wires_reducer_to_bus(language) -> None:
 # The app shell is not imported — assert that
 # ---------------------------------------------------------------------------
 def test_ui_package_does_not_import_tkinter_at_top_level() -> None:
-    """Importing ``app.ui`` must succeed without a display or tkinter."""
-    import importlib
+    """Importing ``app.ui`` must not pull tkinter in.
+
+    Run in a fresh subprocess because a full-suite run has already
+    imported tkinter transitively (uiautomation, pyautogui), and no
+    amount of clearing ``sys.modules`` can isolate that. The subprocess
+    starts clean, imports ``app.ui``, and asserts tkinter did not come
+    along for the ride.
+    """
+    import subprocess
     import sys
+    from pathlib import Path
 
-    # Remove any cached modules so the import is fresh.
-    for name in list(sys.modules):
-        if name == "app.ui" or name.startswith("app.ui."):
-            del sys.modules[name]
-
-    module = importlib.import_module("app.ui")
-    assert hasattr(module, "UIController")
-    assert hasattr(module, "UIState")
-    # tkinter is not imported by the package itself.
-    assert "tkinter" not in sys.modules
+    project_root = Path(__file__).resolve().parents[1]
+    code = (
+        "import sys\n"
+        "import app.ui\n"
+        "assert 'tkinter' not in sys.modules, ("
+        "'importing app.ui pulled tkinter into sys.modules'\n"
+        ")\n"
+        "assert hasattr(app.ui, 'UIController')\n"
+        "assert hasattr(app.ui, 'UIState')\n"
+        "print('ok')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout

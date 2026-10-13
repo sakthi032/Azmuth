@@ -17,6 +17,27 @@ from typing import Any, ClassVar
 from app.security.capabilities import Capability
 
 
+class _hybridmethod:
+    """A method that works as both a class method and an instance method.
+
+    When called on the class, receives ``cls``. When called on an
+    instance, receives the instance. Standard ``classmethod`` and
+    plain methods each support only one form; this supports both.
+    """
+
+    def __init__(self, func):  # noqa: ANN001
+        self._func = func
+
+    def __get__(self, obj, cls=None):  # noqa: ANN001
+        target = obj if obj is not None else cls
+
+        def bound(*args, **kwargs):
+            return self._func(target, *args, **kwargs)
+
+        bound.__doc__ = self._func.__doc__
+        return bound
+
+
 class RiskLevel(str, Enum):
     """How consequential a tool call is.
 
@@ -150,14 +171,21 @@ class Tool(ABC):
         """
 
     # -- introspection ------------------------------------------------------
-    @classmethod
-    def metadata(cls) -> ToolMetadata:
+    @_hybridmethod
+    def metadata(source) -> ToolMetadata:  # noqa: ANN001
+        """Return this tool's metadata.
+
+        Works on both the class (``EchoTool.metadata()``) and an
+        instance (``tool.metadata()``). Class-level calls use the class
+        attributes; instance-level calls pick up per-instance overrides
+        set by the browser factory.
+        """
         return ToolMetadata(
-            name=cls.name,
-            description=cls.description,
-            parameters=cls.parameters,
-            capability=cls.capability,
-            risk_level=cls.risk_level,
-            requires_confirmation=cls.requires_confirmation,
-            can_run_async=cls.can_run_async,
+            name=source.name,
+            description=source.description,
+            parameters=source.parameters,
+            capability=source.capability,
+            risk_level=source.risk_level,
+            requires_confirmation=source.requires_confirmation,
+            can_run_async=source.can_run_async,
         )

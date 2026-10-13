@@ -1,24 +1,12 @@
 
-"""The boundary between the UI and the backend.
-
-:class:`UIController` is the only thing the tkinter shell talks to. It
-owns:
-
-* a :class:`UIState` (shared with the widgets),
-* a :class:`UIReducer` subscribed to the event bus,
-* an *responder* - the callable that produces a reply to a user turn,
-* the current conversation id, threaded through every turn so short-term
-  memory persists across the whole session.
-
-In Phase 1 the responder defaults to :class:`StubResponder`, clearly
-labelled as a development placeholder. STEP 17 supplies the real
-responder (the brain's pipeline). No UI file changes when that happens.
-"""
+"""The boundary between the UI and the backend."""
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from typing import Any
 
+from app.brain.pipeline import ConfirmationRequest, Confirmer
 from app.config.logging_setup import get_logger
 from app.core.events import EventBus
 from app.language.manager import LanguageManager
@@ -29,34 +17,55 @@ from app.voice.input_manager import InputManager, UserInput
 logger = get_logger("ui.bridge")
 
 
-#: A responder takes a UserInput plus the current conversation id (which
-#: is ``None`` on the first turn) and returns ``(reply_text, session_id)``.
-#: The session id is threaded back so short-term memory persists across
-#: turns. :meth:`Azmuth.respond_as_text` already matches this signature.
+#: A responder takes a UserInput, the current conversation id, and an
+#: optional confirmer. It returns either ``(reply_text, session_id)``
+#: or ``(reply_text, session_id, model, provider)``. Both are accepted;
+#: the extended form is what Azmuth.respond_as_text produces.
 Responder = Callable[
-    [UserInput, "str | None"],
-    Awaitable["tuple[str, str]"],
+    [UserInput, "str | None", "Confirmer | None"],
+    Awaitable["tuple[Any, ...]"],
 ]
 
 
-class StubResponder:
-    """Development placeholder that echoes the user's input.
+def _unpack_result(result: tuple[Any, ...]) -> tuple[str, str, str, str]:
+    """Return (reply, session_id, model, provider) from a responder result.
 
-    **Not an LLM.** Produces ``"[stub] <user text>"`` so the UI can be
-    exercised end-to-end before the brain is configured. STEP 17 supplies
-    the real responder; nothing in the UI changes.
+    Accepts a 2-tuple (legacy) or a 4-tuple (with model info). Anything
+    else is a contract violation and raises ValueError with a clear
+    message — the bridge is not the place to guess.
     """
+    if len(result) == 2:
+        reply, session_id = result
+        return reply or "", session_id or "", "", ""
+    if len(result) == 4:
+        reply, session_id, model, provider = result
+        return (
+            reply or "",
+            session_id or "",
+            str(model or ""),
+            str(provider or ""),
+        )
+    raise ValueError(
+        f"responder must return 2 or 4 values, got {len(result)}"
+    )
+
+
+class StubResponder:
+    """Development placeholder that echoes the user's input."""
 
     async def __call__(
-        self, user_input: UserInput, conversation_id: str | None = None
-    ) -> tuple[str, str]:
+        self,
+        user_input: UserInput,
+        conversation_id: str | None = None,
+        confirmer: Confirmer | None = None,
+    ) -> tuple[str, str, str, str]:
+        del confirmer
         text = f"[stub] {user_input.text}"
-        session_id = conversation_id or "stub-session"
-        return text, session_id
+        return text, conversation_id or "stub-session", "stub", "stub"
 
 
 class UIController:
-    """The API the tkinter shell uses. No widget imports here."""
+    """The API the tkinter shell uses."""
 
     def __init__(
         self,
@@ -64,12 +73,14 @@ class UIController:
         language: LanguageManager,
         event_bus: EventBus | None = None,
         responder: Responder | None = None,
+        confirmer: Confirmer | None = None,
         state: UIState | None = None,
     ) -> None:
         self._state = state or UIState()
         self._language = language
         self._inputs = InputManager(language)
         self._responder: Responder = responder or StubResponder()
+        self._confirmer: Confirmer | None = confirmer
         self._reducer = UIReducer(self._state, event_bus)
         self._busy = False
         self._conversation_id: str | None = None
@@ -85,29 +96,24 @@ class UIController:
 
     @property
     def conversation_id(self) -> str | None:
-        """The current session id, or ``None`` before the first turn."""
         return self._conversation_id
 
     def reset_conversation(self) -> None:
-        """Start a fresh session on the next turn. Does not clear history."""
         self._conversation_id = None
+
+    def set_confirmer(self, confirmer: Confirmer | None) -> None:
+        self._confirmer = confirmer
 
     def subscribe(self, listener) -> Callable[[], None]:  # noqa: ANN001
         return self._state.subscribe(listener)
 
     def detach(self) -> None:
-        """Stop the reducer and drop subscriptions. Idempotent."""
         self._reducer.detach()
 
     # -- user actions ------------------------------------------------------
     async def send_text(
         self, text: str, *, session_language: str | None = None
     ) -> str:
-        """Process a typed message. Returns the assistant reply text.
-
-        The reply is also recorded in :attr:`UIState.conversation` - the
-        return value is for callers that want to react programmatically.
-        """
         text = text.strip()
         if not text:
             return ""
@@ -130,8 +136,8 @@ class UIController:
             )
 
             try:
-                reply, session_id = await self._responder(
-                    user_input, self._conversation_id
+                raw = await self._responder(
+                    user_input, self._conversation_id, self._confirmer
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
@@ -144,23 +150,24 @@ class UIController:
                 )
                 return ""
 
+            reply, session_id, model, provider = _unpack_result(raw)
+
             if session_id:
                 self._conversation_id = session_id
             if not reply:
                 return ""
             self._state.add_assistant_message(
-                reply, language=user_input.language, source="text"
+                reply,
+                language=user_input.language,
+                source="text",
+                model=model,
+                provider=provider,
             )
             return reply
         finally:
             self._busy = False
 
     async def add_voice_input(self, user_input: UserInput) -> str:
-        """Record a voice input and produce a reply.
-
-        Voice and text converge here - this is the same code path as
-        :meth:`send_text`, only the input source differs.
-        """
         if self._busy:
             return ""
         self._busy = True
@@ -171,8 +178,8 @@ class UIController:
                 source="voice",
             )
             try:
-                reply, session_id = await self._responder(
-                    user_input, self._conversation_id
+                raw = await self._responder(
+                    user_input, self._conversation_id, self._confirmer
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
@@ -181,18 +188,24 @@ class UIController:
                 )
                 self._state.set_error(str(exc))
                 return ""
+
+            reply, session_id, model, provider = _unpack_result(raw)
+
             if session_id:
                 self._conversation_id = session_id
             if reply:
                 self._state.add_assistant_message(
-                    reply, language=user_input.language, source="voice"
+                    reply,
+                    language=user_input.language,
+                    source="voice",
+                    model=model,
+                    provider=provider,
                 )
             return reply
         finally:
             self._busy = False
 
     def cancel_task(self, task_id: str) -> None:
-        """UI-level cancel request. STEP 17 wires this to the TaskManager."""
         self._state.add_system_message(f"Cancel requested for task {task_id}")
 
     def clear_conversation(self) -> None:

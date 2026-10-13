@@ -268,5 +268,11 @@ class ToolManager:
                 extra={"event": name.value},
             )
 
+    def requires_confirmation(self, name: str) -> bool:
+        """True if the tool or its capability requires user confirmation."""
+        tool = self._registry.get(name)
+        if tool.requires_confirmation:
+            return True
+        return self._permissions.requires_confirmation(tool.capability)
 
 __all__ = ["ToolManager"]

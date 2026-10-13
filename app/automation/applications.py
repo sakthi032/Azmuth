@@ -20,6 +20,8 @@ from app.config.logging_setup import get_logger
 from app.core.errors import AutomationError
 from app.automation.base import AppLaunchResult, ProcessInfo
 from app.automation.policy import ApplicationPolicy
+from app.automation.discovery import AppDiscovery
+import shutil
 
 logger = get_logger("automation.applications")
 
@@ -31,12 +33,31 @@ _LAUNCH_TIMEOUT_SECONDS = 10.0
 #: Same idea for the process-list and kill commands.
 _PROBE_TIMEOUT_SECONDS = 5.0
 
+#: UWP apps and their backing process names. When a user asks to close
+#: one of these, ``taskkill`` by alias name will not work because the
+#: actual process has a different name. This maps the user-facing name
+#: to the real process to terminate.
+_UWP_PROCESS_MAP: dict[str, list[str]] = {
+    "settings": ["SystemSettings.exe", "ApplicationFrameHost.exe"],
+    "calculator": ["CalculatorApp.exe", "Calculator.exe", "ApplicationFrameHost.exe"],
+    "store": ["WinStore.App.exe", "ApplicationFrameHost.exe"],
+    "photos": ["Microsoft.Photos.exe", "ApplicationFrameHost.exe"],
+    "camera": ["WindowsCamera.exe", "ApplicationFrameHost.exe"],
+    "clock": ["Time.exe", "ApplicationFrameHost.exe"],
+    "maps": ["Maps.exe", "ApplicationFrameHost.exe"],
+    "weather": ["Weather.exe", "ApplicationFrameHost.exe"],
+    "mail": ["HxOutlook.exe", "ApplicationFrameHost.exe"],
+    "calendar": ["HxCalendarAppImm.exe", "ApplicationFrameHost.exe"],
+}
 
 class ApplicationController:
     """Launch, inspect, and terminate applications and processes."""
 
     def __init__(self, policy: ApplicationPolicy | None = None) -> None:
+        from app.automation.discovery import AppDiscovery
+
         self._policy = policy if policy is not None else ApplicationPolicy.default_windows()
+        self._discovery = AppDiscovery()
 
     # -- discovery ---------------------------------------------------------
     @property
@@ -48,16 +69,68 @@ class ApplicationController:
 
     # -- launch ------------------------------------------------------------
     async def open(self, alias: str) -> AppLaunchResult:
-        """Launch the allowlisted application ``alias``.
+        """Launch an allowlisted or discovered application."""
+        key = alias.strip().lower()
+        target = self._policy.aliases.get(key, "")
 
-        Raises :class:`AutomationError` if the alias is unknown, the
-        resolved executable does not exist, or the process fails to start.
-        """
-        executable: Path = self._policy.resolve(alias)
+        # Protocol aliases (ms-settings:, etc.) have their own path.
+        if target.startswith("ms-") and target.endswith(":"):
+            return await self._open_protocol(alias, target)
+
+        # Not in the policy: try discovery.
+        if not target:
+            discovered = self._discovery.list_installed()
+            match = next(
+                (a for a in discovered
+                 if a.name.lower() == key and a.target),
+                None,
+            ) or next(
+                (a for a in discovered
+                 if key in a.name.lower() and a.target),
+                None,
+            )
+            if match is not None:
+                target = match.target
+                logger.info(
+                    "resolved app via discovery",
+                    extra={
+                        "event": "APP_RESOLVED_BY_DISCOVERY",
+                        "alias": alias,
+                        "resolved": target,
+                    },
+                )
+
+        if not target:
+            raise AutomationError(
+                f"application {alias!r} is not in the allowlist and was "
+                f"not found by discovery. Run list_installed_apps to see "
+                f"what is available."
+            )
+
+        # Normalise the target into a Path. Absolute paths must exist;
+        # bare names resolve against PATH.
+        candidate = Path(target)
+        if candidate.is_absolute():
+            if not candidate.is_file():
+                raise AutomationError(
+                    f"application {alias!r} resolved to {candidate}, "
+                    f"which does not exist"
+                )
+            executable = candidate
+        else:
+            located = shutil.which(target)
+            if located is None:
+                raise AutomationError(
+                    f"application {alias!r} (exe {target!r}) is not on PATH"
+                )
+            executable = Path(located)
+
+        # Extra command-line arguments from the policy, if any.
+        extra_args = self._policy.arguments_for(alias)
 
         try:
             process = await asyncio.to_thread(
-                _spawn_detached, str(executable)
+                _spawn_detached, str(executable), extra_args
             )
         except FileNotFoundError as exc:
             raise AutomationError(
@@ -83,22 +156,86 @@ class ApplicationController:
             executable=str(executable),
         )
 
+
+    async def _open_protocol(
+        self, alias: str, protocol: str
+    ) -> AppLaunchResult:
+        """Launch a Windows URI handler (``ms-settings:``, etc.).
+
+        Uses ``os.startfile``, which is Windows' native way to invoke a
+        registered protocol handler — the same mechanism as typing the
+        URI into the Start menu or clicking a link.
+
+        There is no PID to return: the protocol handler is launched by
+        ``explorer.exe`` and the URI does not map to a single process.
+        We return ``pid=0`` to signal "no attributable process".
+        """
+        import os
+
+        if not hasattr(os, "startfile"):
+            raise AutomationError(
+                f"protocol launch ({protocol}) is only supported on Windows"
+            )
+
+        try:
+            await asyncio.to_thread(os.startfile, protocol)
+        except OSError as exc:
+            raise AutomationError(
+                f"failed to launch protocol {protocol!r}: {exc}"
+            ) from exc
+
+        logger.info(
+            "protocol launched",
+            extra={
+                "event": "PROTOCOL_LAUNCHED",
+                "alias": alias,
+                "protocol": protocol,
+            },
+        )
+        return AppLaunchResult(alias=alias, pid=0, executable=protocol)
+
+    async def process_names_by_pid(self) -> dict[int, str]:
+        """Return a mapping of PID → image name for currently running processes."""
+        processes = await self.list_processes()
+        return {p.pid: p.name for p in processes}
+    
     # -- terminate ---------------------------------------------------------
     async def close(self, identifier: str) -> int:
-        """Terminate by PID (``"1234"``) or image name (``"notepad.exe"``).
-
-        Returns the number of processes the OS reported as terminated.
-        """
         identifier = identifier.strip()
         if not identifier:
             raise AutomationError("identifier must be non-empty")
 
+        # UWP apps: map the user-facing name to the real backing process.
+        uwp_targets = _UWP_PROCESS_MAP.get(identifier.lower())
+        if uwp_targets is not None:
+            total = 0
+            for target in uwp_targets:
+                try:
+                    stdout = await _run_capture(
+                        ["taskkill", "/IM", target, "/T", "/F"],
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                        accept_exit_codes=(0, 1, 2, 128, 255),
+                    )
+                    total += stdout.count("SUCCESS:")
+                except AutomationError:
+                    continue
+            logger.info(
+                "uwp app close attempted",
+                extra={
+                    "event": "UWP_CLOSE_ATTEMPTED",
+                    "identifier": identifier,
+                    "targets": uwp_targets,
+                    "terminated": total,
+                },
+            )
+            return total
+
         if identifier.isdigit():
-            argv = ["taskkill", "/PID", identifier, "/F"]
+            argv = ["taskkill", "/PID", identifier, "/T", "/F"]
+            image_name = await self._image_name_for_pid(identifier)
         else:
-            # Image-name termination. No `/T` (tree kill) and no user
-            # escalation — we are only allowed to kill processes we own.
-            argv = ["taskkill", "/IM", identifier, "/F"]
+            argv = ["taskkill", "/IM", identifier, "/T", "/F"]
+            image_name = identifier
 
         # Exit code 1 is taskkill's "could not terminate" (packaged apps,
         # protected processes). It is a valid, expected outcome — the
@@ -106,9 +243,35 @@ class ApplicationController:
         stdout = await _run_capture(
             argv,
             timeout=_PROBE_TIMEOUT_SECONDS,
-            accept_exit_codes=(0, 1, 128),
+            accept_exit_codes=(0, 1, 2, 128, 255),
         )
         count = stdout.count("SUCCESS:")
+
+        # Verification pass. On Windows 11, launching System32\notepad.exe
+        # spawns a redirector that exits and hands off to the packaged
+        # Store app under a different PID. Killing the original PID
+        # reports success while the window stays open. If we were given a
+        # PID, check whether the same image name is still running, and if
+        # it is, kill by name as a second pass.
+        if identifier.isdigit() and image_name:
+            still_running = await self._is_process_running(image_name)
+            if still_running:
+                logger.info(
+                    "PID kill left named process running; "
+                    "falling back to image kill",
+                    extra={
+                        "event": "PROCESS_CLOSE_FALLBACK",
+                        "image_name": image_name,
+                        "initial_pid": identifier,
+                    },
+                )
+                fallback = await _run_capture(
+                    ["taskkill", "/IM", image_name, "/T", "/F"],
+                    timeout=_PROBE_TIMEOUT_SECONDS,
+                    accept_exit_codes=(0, 1, 2, 128, 255),
+                )
+                count += fallback.count("SUCCESS:")
+
         if count == 0:
             # taskkill returns 0 even when nothing matched; treat that as
             # "no processes terminated" so the caller can distinguish.
@@ -130,6 +293,33 @@ class ApplicationController:
             )
         return count
 
+    async def _image_name_for_pid(self, pid: str) -> str | None:
+        """Return the image name for a running PID, or None if unknown."""
+        try:
+            stdout = await _run_capture(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                timeout=_PROBE_TIMEOUT_SECONDS,
+            )
+        except AutomationError:
+            return None
+        # tasklist emits an INFO line when nothing matched.
+        if not stdout.strip() or "INFO:" in stdout:
+            return None
+        rows = list(csv.reader(io.StringIO(stdout)))
+        if not rows or not rows[0]:
+            return None
+        return rows[0][0].strip() or None
+
+    async def _is_process_running(self, image_name: str) -> bool:
+        """True if any process with this image name is running."""
+        try:
+            stdout = await _run_capture(
+                ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
+                timeout=_PROBE_TIMEOUT_SECONDS,
+            )
+        except AutomationError:
+            return False
+        return bool(stdout.strip()) and "INFO:" not in stdout
  
     # -- list --------------------------------------------------------------
     async def list_processes(self) -> list[ProcessInfo]:
@@ -148,7 +338,9 @@ class ApplicationController:
 # --------------------------------------------------------------------------
 # Blocking helpers (run under to_thread)
 # --------------------------------------------------------------------------
-def _spawn_detached(executable: str) -> subprocess.Popen[bytes]:
+def _spawn_detached(
+    executable: str, extra_args: tuple[str, ...] = ()
+) -> subprocess.Popen[bytes]:
     """Spawn a process with an argv list. Never uses a shell.
 
     Windows flags ``DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`` ensure
@@ -156,8 +348,9 @@ def _spawn_detached(executable: str) -> subprocess.Popen[bytes]:
     Azmuth exits. On non-Windows the flags are omitted; the module is
     still importable, only launching non-win32 binaries fails.
     """
+    argv = [executable, *extra_args]
     kwargs: dict[str, object] = {
-        "args": [executable],
+        "args": argv,
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
@@ -257,3 +450,5 @@ def _parse_tasklist_csv(text: str) -> list[ProcessInfo]:
             ProcessInfo(pid=pid, name=name, session=session, memory_kb=memory_kb)
         )
     return results
+
+

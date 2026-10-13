@@ -1,42 +1,22 @@
-"""Multi-model router.
 
-The brain calls :meth:`LLMRouter.for_purpose` with a task type; the
-router returns the provider that should handle it. The decision is:
-
-1. Look up models registered for that purpose, ordered by tier and
-   local-first.
-2. Walk the list; return the first whose provider reports available.
-3. If nothing is available, raise :class:`ProviderUnavailableError`.
-
-The router owns **provider instances**, one per provider name. A
-provider is constructed lazily when first needed, using the settings for
-that provider. That way a user with no NVIDIA API key never pays the
-construction cost, and the router's fallback chain automatically skips
-unavailable tiers.
-
-The router is deliberately a *selector*, not an *executor*. The brain
-still calls ``.chat()`` on the returned provider. This keeps the router
-trivial to test and keeps the pipeline's code unaware that routing
-exists at all.
-"""
+"""Multi-model router."""
 
 from __future__ import annotations
+
+import time
 
 from app.config.logging_setup import get_logger
 from app.config.settings import Settings
 from app.core.errors import ProviderNotFoundError, ProviderUnavailableError
 from app.llm.base import LLMProvider
-from app.llm.registry import ModelPurpose, ModelRegistry, ModelSpec
-from app.llm.providers.ollama import OllamaProvider
+from app.llm.providers.gemini import GeminiProvider
+from app.llm.providers.groq import GroqProvider
 from app.llm.providers.nvidia_nim import NvidiaNIMProvider
+from app.llm.providers.ollama import OllamaProvider
+from app.llm.registry import ModelPurpose, ModelRegistry, ModelSpec
 
 logger = get_logger("llm.router")
 
-# In app/llm/router.py
-from app.llm.providers.groq import GroqProvider
-from app.llm.providers.gemini import GeminiProvider
-
-# Add the new classes to the dictionary
 _PROVIDER_CLASSES: dict[str, type[LLMProvider]] = {
     "ollama": OllamaProvider,
     "nvidia_nim": NvidiaNIMProvider,
@@ -47,6 +27,10 @@ _PROVIDER_CLASSES: dict[str, type[LLMProvider]] = {
 
 class LLMRouter:
     """Select the right provider for a purpose, with fallback."""
+
+    #: How long to skip a provider after it fails. An expired token or a
+    #: rate limit should not cost every turn the same wasted round-trip.
+    FAILURE_COOLDOWN_SECONDS: float = 120.0
 
     def __init__(
         self,
@@ -61,6 +45,7 @@ class LLMRouter:
         if provider_classes:
             self._provider_classes.update(provider_classes)
         self._providers: dict[str, LLMProvider] = {}
+        self._dead_until: dict[str, float] = {}
 
     # -- introspection -----------------------------------------------------
     @property
@@ -71,7 +56,6 @@ class LLMRouter:
         return tuple(ModelPurpose)
 
     def describe_routing(self) -> list[dict[str, object]]:
-        """Return a human-readable routing table. Used by diagnostics and UI."""
         rows: list[dict[str, object]] = []
         for purpose in ModelPurpose:
             candidates = self._registry.by_purpose(purpose)
@@ -86,16 +70,8 @@ class LLMRouter:
 
     # -- selection ---------------------------------------------------------
     def for_purpose(
-        self,
-        purpose: ModelPurpose,
-        *,
-        local_only: bool = False,
+        self, purpose: ModelPurpose, *, local_only: bool = False
     ) -> LLMProvider:
-        """Return the provider best suited for ``purpose``.
-
-        Raises :class:`ProviderUnavailableError` when no registered model
-        for this purpose has an available provider.
-        """
         candidates = self._registry.by_purpose(purpose, local_only=local_only)
         if not candidates:
             raise ProviderUnavailableError(
@@ -124,7 +100,6 @@ class LLMRouter:
         return provider
 
     def for_model(self, model_name: str) -> LLMProvider:
-        """Return the provider that serves a specific model, by name."""
         spec = self._registry.by_name(model_name)
         if spec is None:
             raise ProviderNotFoundError(f"model {model_name!r} is not registered")
@@ -135,9 +110,51 @@ class LLMRouter:
             )
         return provider
 
+    # -- failure tracking --------------------------------------------------
+    def record_failure(
+        self, spec: ModelSpec, *, cooldown_seconds: float | None = None
+    ) -> None:
+        """Mark a model as recently failed so the router skips it briefly.
+
+        Called by the pipeline when a provider raises. The cooldown means
+        an expired token or a rate-limited provider does not cost every
+        turn the same wasted call.
+        """
+        key = self._cache_key(spec)
+        cooldown = (
+            cooldown_seconds
+            if cooldown_seconds is not None
+            else self.FAILURE_COOLDOWN_SECONDS
+        )
+        self._dead_until[key] = time.monotonic() + cooldown
+        logger.info(
+            "provider marked unhealthy",
+            extra={
+                "event": "LLM_PROVIDER_UNHEALTHY",
+                "provider": spec.provider,
+                "model": spec.name,
+                "cooldown_seconds": cooldown,
+            },
+        )
+
+    def record_success(self, spec: ModelSpec) -> None:
+        """Clear any failure record for a model that just answered."""
+        self._dead_until.pop(self._cache_key(spec), None)
+
+    def is_healthy(self, spec: ModelSpec) -> bool:
+        return self._dead_until.get(self._cache_key(spec), 0.0) <= time.monotonic()
+
     # -- internals ---------------------------------------------------------
-    def _first_available(self, candidates: tuple[ModelSpec, ...]) -> ModelSpec | None:
+    @staticmethod
+    def _cache_key(spec: ModelSpec) -> str:
+        return f"{spec.provider}::{spec.name}"
+
+    def _first_available(
+        self, candidates: tuple[ModelSpec, ...]
+    ) -> ModelSpec | None:
         for spec in candidates:
+            if not self.is_healthy(spec):
+                continue
             try:
                 provider = self._provider_for(spec)
             except Exception as exc:  # noqa: BLE001
@@ -146,6 +163,7 @@ class LLMRouter:
                     extra={
                         "event": "LLM_PROVIDER_BUILD_FAILED",
                         "provider": spec.provider,
+                        "model": spec.name,
                         "reason": str(exc),
                     },
                 )
@@ -155,14 +173,7 @@ class LLMRouter:
         return None
 
     def _provider_for(self, spec: ModelSpec) -> LLMProvider:
-        """Return (and cache) the provider instance for ``spec.provider``.
-
-        The provider is constructed with the model name from the spec, so
-        each provider instance serves exactly one model. This is simpler
-        than a provider that holds many models: the router picks the
-        model, and the provider just talks to it.
-        """
-        cache_key = f"{spec.provider}::{spec.name}"
+        cache_key = self._cache_key(spec)
         if cache_key in self._providers:
             return self._providers[cache_key]
 
@@ -180,8 +191,9 @@ class LLMRouter:
     def _build_provider(
         self, cls: type[LLMProvider], spec: ModelSpec
     ) -> LLMProvider:
-        """Construct a provider using settings appropriate to its name."""
+        """Construct a provider with the credentials its name implies."""
         s = self._settings
+
         if spec.provider == "ollama":
             return cls(
                 model=spec.name,
@@ -189,6 +201,7 @@ class LLMRouter:
                 api_key="ollama",
                 timeout=s.llm_timeout_seconds,
             )
+
         if spec.provider == "nvidia_nim":
             return cls(
                 model=spec.name,
@@ -196,35 +209,53 @@ class LLMRouter:
                 api_key=s.nvidia_api_key,
                 timeout=s.llm_timeout_seconds,
             )
-        # Unknown provider name handled above, so this is defensive only.
+
+        if spec.provider == "groq":
+            return cls(
+                model=spec.name,
+                base_url=s.groq_base_url,
+                api_key=s.groq_api_key,
+                timeout=s.llm_timeout_seconds,
+            )
+
+        if spec.provider == "gemini":
+            return cls(
+                model=spec.name,
+                base_url=s.gemini_base_url,
+                api_key=s.gemini_api_key,
+                timeout=s.llm_timeout_seconds,
+            )
+
+        # Unknown provider name — the class exists but nothing knows how
+        # to configure it. Build with model only; the provider's own
+        # is_available() decides whether that is enough.
+        logger.warning(
+            "router has no credentials branch for provider",
+            extra={"event": "LLM_PROVIDER_UNCONFIGURED", "provider": spec.provider},
+        )
         return cls(model=spec.name)
 
     def refresh(self) -> None:
-        """Forget cached providers and their model lists. Next call re-probes."""
         for provider in self._providers.values():
             refresh = getattr(provider, "refresh_models", None)
             if callable(refresh):
                 refresh()
         self._providers.clear()
-        
+        self._dead_until.clear()
+
+    # -- warmup ------------------------------------------------------------
     async def warmup(self) -> dict[str, bool]:
-        """Send a minimal request to every registered model.
-
-        NVIDIA NIM's free tier unloads idle models; the first call after
-        an unload pays a 30-120s cold start. Warming up at startup moves
-        that cost off the user's first question.
-
-        Returns a dict of model name → whether the warmup succeeded. Never
-        raises; a failed warmup just means that model stays cold.
-        """
         import asyncio
 
         from app.llm.messages import ChatRequest, Message, Role
 
         seen: set[str] = set()
-        specs = [m for m in self._registry.all() if m.name not in seen and not seen.add(m.name)]
+        specs = [
+            m for m in self._registry.all()
+            if m.name not in seen and not seen.add(m.name)
+        ]
 
-        async def warm_one(spec) -> tuple[str, bool]:
+        async def warm_one(spec: ModelSpec) -> tuple[str, bool]:
             try:
                 provider = self._provider_for(spec)
                 request = ChatRequest(
@@ -232,8 +263,10 @@ class LLMRouter:
                     max_tokens=1,
                 )
                 await provider.chat(request)
+                self.record_success(spec)
                 return spec.name, True
             except Exception as exc:  # noqa: BLE001
+                self.record_failure(spec)
                 logger.info(
                     "warmup failed for model",
                     extra={
@@ -245,8 +278,12 @@ class LLMRouter:
                 return spec.name, False
 
         logger.info(
-            "warming up %d models", len(specs),
+            "warming up %d models",
+            len(specs),
             extra={"event": "LLM_WARMUP_STARTED"},
         )
         results = await asyncio.gather(*(warm_one(s) for s in specs))
         return dict(results)
+
+
+__all__ = ["LLMRouter"]

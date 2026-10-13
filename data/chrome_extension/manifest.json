@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Azmuth Bridge",
+  "version": "1.0.0",
+  "description": "Lets Azmuth control Chrome tabs via a local WebSocket.",
+  "permissions": ["tabs", "tabGroups", "alarms"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://localhost:9280 ws://127.0.0.1:9280;"
+  }
+}

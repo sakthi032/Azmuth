@@ -1,83 +1,91 @@
-"""Data types shared by every LLM provider.
 
-These are plain immutable dataclasses. No provider-specific shape leaks in:
-an OpenAI response, an Anthropic response, and a local model's response all
-land in the same :class:`ChatResponse`. That is what lets the brain stay
-provider-agnostic.
-"""
+"""Data types shared by every LLM provider."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 
 class Role(str, Enum):
-    """Message author. Subclasses ``str`` so it serialises cleanly."""
-
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
+    TOOL = "tool"          # a tool's reply, when native tool calls are used
 
 
 @dataclass(frozen=True, slots=True)
 class Message:
-    """A single turn in a conversation."""
-
     role: Role
     content: str
+    tool_call_id: str | None = None   # for Role.TOOL messages
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, Role):
-            # Accept "user" / "system" / "assistant" strings for convenience.
             object.__setattr__(self, "role", Role(self.role))
 
 
 @dataclass(frozen=True, slots=True)
 class Usage:
-    """Token accounting, when the provider reports it."""
-
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
+class ToolDefinition:
+    """A tool the model may call, in OpenAI's native function schema."""
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+    def to_openai(self) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallRequest:
+    """A tool call the model asked for, parsed from a native response."""
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "name": self.name, "arguments": dict(self.arguments)}
+
+
+@dataclass(frozen=True, slots=True)
 class ChatRequest:
-    """Provider-independent request.
-
-    ``model`` is an override. When ``None`` the provider uses its configured
-    default. Normal call sites should leave it unset.
-    """
-
     messages: tuple[Message, ...]
     model: str | None = None
     temperature: float = 0.7
     max_tokens: int | None = None
     stop: tuple[str, ...] = ()
     request_id: str | None = None
+    tools: tuple[ToolDefinition, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class ChatResponse:
-    """Provider-independent response."""
-
     content: str
     model: str
     provider: str
     finish_reason: str | None = None
     usage: Usage | None = None
     latency_ms: float = 0.0
+    tool_calls: tuple[ToolCallRequest, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class StreamChunk:
-    """One delta from a streaming response.
-
-    Concatenating every ``delta`` in order must reproduce the same text a
-    non-streaming ``chat()`` would have produced.
-    """
-
     delta: str
     index: int = 0
     finish_reason: str | None = None
@@ -85,10 +93,8 @@ class StreamChunk:
 
 @dataclass(frozen=True, slots=True)
 class ModelInfo:
-    """What a provider can tell us about the model it is serving."""
-
     provider: str
     model: str
     context_window: int | None = None
     supports_streaming: bool = True
-    extra: dict[str, object] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)

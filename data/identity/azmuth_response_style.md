@@ -636,10 +636,3 @@ If I can't detect your location, I will say:
 ✅ I use it for weather, gold rates, news, and local information
 ✅ I cache it for the session (only detect once)
 ✅ I respect your privacy (location is only used for queries)
-
-### What I DON'T Do with Your Location:
-
-❌ I never store your location permanently
-❌ I never share your location with anyone
-❌ I never track your movement
-❌ I never use your location for anything other than answering your queries

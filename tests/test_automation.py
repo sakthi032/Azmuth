@@ -292,21 +292,109 @@ def test_screenshot_raises_provider_unavailable(tmp_path: Path) -> None:
     with pytest.raises(ProviderUnavailableError, match="screenshot"):
         _run(impl.take_screenshot(str(tmp_path / "shot.png")))
 
+class _RecordingInput:
+    """Wraps InputController to record calls without sending real input.
 
-def test_input_methods_raise_provider_unavailable(tmp_path: Path) -> None:
+    Real ``SendInput`` calls hit whatever window has focus — which, in a
+    test run, is the terminal. These tests verify the *dispatch* path,
+    not the OS interaction. A real end-to-end check belongs in a manual
+    smoke test, not the automated suite.
+    """
+
+    def __init__(self) -> None:
+        from app.automation.input import InputController
+        self._real = InputController()
+        self.sent: list[tuple[str, tuple, dict]] = []
+
+    def is_available(self) -> bool:
+        return self._real.is_available()
+
+    async def send_keys(self, keys: str) -> None:
+        self.sent.append(("send_keys", (keys,), {}))
+
+    async def press_keys(self, keys: str) -> None:
+        self.sent.append(("press_keys", (keys,), {}))
+
+    async def type_text(self, text: str, **_: object) -> None:
+        self.sent.append(("type_text", (text,), {}))
+
+    async def move_mouse(self, x: int, y: int, **_: object) -> None:
+        self.sent.append(("move_mouse", (x, y), {}))
+
+    async def click(self, x: int | None = None, y: int | None = None, **_: object) -> None:
+        self.sent.append(("click", (x, y), {}))
+
+
+def test_input_controller_dispatches_send_keys(tmp_path: Path) -> None:
+    """``send_keys`` forwards to the input controller without raising.
+
+    Uses a fake input controller so no real keystrokes are sent.
+    """
     impl = _impl_with_sandbox(tmp_path)
-    with pytest.raises(ProviderUnavailableError, match="keyboard"):
-        _run(impl.send_keys("hi"))
-    with pytest.raises(ProviderUnavailableError, match="mouse"):
-        _run(impl.move_mouse(0, 0))
-    with pytest.raises(ProviderUnavailableError, match="mouse"):
-        _run(impl.click(0, 0))
+    recorder = _RecordingInput()
+    impl._input = recorder  # type: ignore[assignment]
+
+    _run(impl.send_keys("enter"))
+    _run(impl.send_keys("ctrl+c"))
+
+    assert len(recorder.sent) == 2
+    assert recorder.sent[0] == ("send_keys", ("enter",), {})
+    assert recorder.sent[1] == ("send_keys", ("ctrl+c",), {})
 
 
-def test_window_methods_raise_provider_unavailable(tmp_path: Path) -> None:
+def test_input_controller_rejects_unknown_key_names(tmp_path: Path) -> None:
+    """A real ``InputController`` raises on a nonsense key name.
+
+    Uses the real controller but monkeypatches ``_send`` so no keystroke
+    is emitted — the key-name validation runs before any send happens.
+    """
+    from app.automation.input import InputController
+
+    controller = InputController()
+    if not controller.is_available():
+        pytest.skip("input controller is not available on this platform")
+
+    sent: list[object] = []
+    controller._send = lambda *a, **kw: sent.append((a, kw))  # type: ignore[method-assign]
+
+    with pytest.raises(AutomationError, match="unknown key name"):
+        _run(controller.press_keys("not_a_real_key_xyz"))
+
+    assert sent == []  # nothing was emitted before the error
+
+
+def test_mouse_operations_dispatch_without_sending(tmp_path: Path) -> None:
     impl = _impl_with_sandbox(tmp_path)
-    with pytest.raises(ProviderUnavailableError, match="window"):
-        _run(impl.list_windows())
+    recorder = _RecordingInput()
+    impl._input = recorder  # type: ignore[assignment]
+
+    _run(impl.move_mouse(100, 100))
+    _run(impl.click(100, 100))
+
+    assert recorder.sent[0][0] == "move_mouse"
+    assert recorder.sent[1][0] == "click"
+    
+
+def test_list_windows_returns_a_list_on_windows(tmp_path: Path) -> None:
+    """``list_windows`` is a real implementation on Windows.
+
+    It returns a list (possibly empty if the desktop is fully hidden,
+    but in practice always non-empty). On non-Windows it returns an
+    empty list. It must never raise.
+    """
+    impl = _impl_with_sandbox(tmp_path)
+    windows = _run(impl.list_windows())
+    assert isinstance(windows, list)
+
+
+def test_focus_window_raises_provider_unavailable(tmp_path: Path) -> None:
+    """Window focus is not implemented — Windows blocks it by design.
+
+    A background process cannot call SetForegroundWindow successfully
+    without the foreground lock. The runtime reports this honestly
+    rather than silently failing.
+    """
+    impl = _impl_with_sandbox(tmp_path)
     with pytest.raises(ProviderUnavailableError, match="window"):
         _run(impl.focus_window("any"))
 

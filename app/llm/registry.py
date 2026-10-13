@@ -229,4 +229,32 @@ def build_default_registry() -> ModelRegistry:
         description="GLM 5.3 Flash. Fast fallback.",
     ))
 
+    # ---- Local Ollama: last-resort fallback -----------------------------
+    # Only used when every cloud provider above has failed. The router
+    # walks tiers in order: it tries tier 1, then 2, then 3, and only
+    # reaches these when the cloud is genuinely unavailable.
+    registry.register(ModelSpec(
+        name="qwen2.5:7b",
+        provider="ollama",
+        purposes=frozenset({
+            ModelPurpose.CHAT, ModelPurpose.REASONING,
+            ModelPurpose.CODING, ModelPurpose.FAST,
+        }),
+        context_window=32_768,
+        is_local=True,
+        tier=3,
+        description="Local fallback when all cloud providers are down.",
+    ))
+    registry.register(ModelSpec(
+        name="llama3.2:3b",
+        provider="ollama",
+        purposes=frozenset({
+            ModelPurpose.CHAT, ModelPurpose.FAST,
+        }),
+        context_window=131_072,
+        is_local=True,
+        tier=3,
+        description="Fast local fallback for chat.",
+    ))
+
     return registry
