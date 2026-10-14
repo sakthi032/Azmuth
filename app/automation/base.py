@@ -129,6 +129,9 @@ class WindowsAutomation(ABC):
         Must never raise. A False return means "unavailable", not "broken";
         callers use this to decide whether to surface the backend at all.
         """
+    @abstractmethod
+    async def set_window_state(self, identifier: str, state: str) -> dict[str, Any]:
+        """Set a window's state: maximize, minimize, restore, or show."""
 
     @property
     @abstractmethod

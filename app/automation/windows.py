@@ -8,6 +8,7 @@ subprocess) live in the controllers.
 from __future__ import annotations
 
 import sys
+from typing import Any, ClassVar
 
 from app.automation.applications import ApplicationController
 from app.automation.base import (
@@ -108,3 +109,7 @@ class WindowsAutomationImpl(WindowsAutomation):
 
     async def focus_window(self, identifier: str) -> bool:
         return await self._windows.focus_window(identifier)
+
+    async def set_window_state(self, identifier: str, state: str) -> dict[str, Any]:
+        return await self._windows.set_window_state(identifier, state)
+    

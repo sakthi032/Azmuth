@@ -1,5 +1,4 @@
-
-"""Window enumeration and window management."""
+"""Window enumeration, focus, and state control."""
 
 from __future__ import annotations
 
@@ -21,6 +20,8 @@ class WindowInfo:
     title: str
     process_id: int
     process_name: str | None = None
+    is_minimized: bool = False
+    is_maximized: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -28,12 +29,20 @@ class WindowInfo:
             "title": self.title,
             "process_id": self.process_id,
             "process_name": self.process_name,
+            "is_minimized": self.is_minimized,
+            "is_maximized": self.is_maximized,
         }
 
 
 _WNDENUMPROC = ctypes.WINFUNCTYPE(
     wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
 )
+
+# ShowWindow constants
+SW_MAXIMIZE = 3
+SW_MINIMIZE = 6
+SW_RESTORE = 9
+SW_SHOW = 5
 
 
 def _is_windows() -> bool:
@@ -66,6 +75,8 @@ def list_windows() -> list[WindowInfo]:
                     handle=int(hwnd),
                     title=title,
                     process_id=int(pid.value),
+                    is_minimized=bool(user32.IsIconic(hwnd)),
+                    is_maximized=bool(user32.IsZoomed(hwnd)),
                 )
             )
         except Exception:  # noqa: BLE001
@@ -82,36 +93,22 @@ def list_windows() -> list[WindowInfo]:
 
 
 def focus_window(handle: int) -> bool:
-    """Bring a window to the foreground by its handle.
-
-    Uses the AttachThreadInput workaround because Windows blocks
-    SetForegroundWindow calls from a background process. The workaround
-    temporarily joins our input queue with the foreground thread's, so
-    our SetForegroundWindow call is treated as originating from the
-    foreground.
-
-    Returns True if the target window is now the foreground window.
-    """
+    """Bring a window to the foreground by its handle."""
     if not _is_windows():
         raise ProviderUnavailableError("window focus is Windows-only")
 
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
 
-    SW_RESTORE = 9
-
     if not user32.IsWindow(handle):
         raise AutomationError(f"window handle {handle} does not exist")
 
-    # Restore if minimized.
     if user32.IsIconic(handle):
         user32.ShowWindow(handle, SW_RESTORE)
 
-    # Fast path: try the direct call.
     if user32.SetForegroundWindow(handle):
         return True
 
-    # Slow path: attach to the current foreground thread's input queue.
     fg = user32.GetForegroundWindow()
     our_thread = kernel32.GetCurrentThreadId()
     fg_thread = user32.GetWindowThreadProcessId(fg, None)
@@ -128,12 +125,49 @@ def focus_window(handle: int) -> bool:
             user32.AttachThreadInput(our_thread, fg_thread, False)
 
 
-def focus_window_by_title(needle: str) -> bool:
-    """Focus the first visible window whose title contains ``needle``.
+def set_window_state(handle: int, state: str) -> bool:
+    """Set a window's state.
 
-    Case-insensitive. Raises if no match, so the caller can list the
-    available titles rather than silently failing.
+    ``state`` is one of: ``maximize``, ``minimize``, ``restore``, ``show``.
+    Returns True on success. Uses ``ShowWindow`` which is what the
+    taskbar buttons and title-bar buttons ultimately call.
     """
+    if not _is_windows():
+        raise ProviderUnavailableError("window state control is Windows-only")
+
+    user32 = ctypes.windll.user32
+    if not user32.IsWindow(handle):
+        raise AutomationError(f"window handle {handle} does not exist")
+
+    mapping = {
+        "maximize": SW_MAXIMIZE,
+        "minimize": SW_MINIMIZE,
+        "restore": SW_RESTORE,
+        "show": SW_SHOW,
+    }
+    key = state.strip().lower()
+    cmd = mapping.get(key)
+    if cmd is None:
+        raise AutomationError(
+            f"unknown window state {state!r}. Use one of: "
+            f"{', '.join(sorted(mapping))}."
+        )
+
+    user32.ShowWindow(handle, cmd)
+
+    # If we asked to maximize or restore, also bring to front so the
+    # user sees the change.
+    if key in ("maximize", "restore"):
+        try:
+            focus_window(handle)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return True
+
+
+def _find_window(needle: str) -> WindowInfo:
+    """Return the first visible window whose title contains ``needle``."""
     needle_lower = needle.lower()
     matches = [w for w in list_windows() if needle_lower in w.title.lower()]
     if not matches:
@@ -141,7 +175,17 @@ def focus_window_by_title(needle: str) -> bool:
         raise AutomationError(
             f"no window title matched {needle!r}. Visible windows: {titles}"
         )
-    return focus_window(matches[0].handle)
+    return matches[0]
+
+
+def focus_window_by_title(needle: str) -> bool:
+    return focus_window(_find_window(needle).handle)
+
+
+def set_window_state_by_title(needle: str, state: str) -> WindowInfo:
+    target = _find_window(needle)
+    set_window_state(target.handle, state)
+    return target
 
 
 class WindowController:
@@ -159,10 +203,18 @@ class WindowController:
 
     async def focus_window(self, identifier: str) -> bool:
         import asyncio
-        # Accept either a numeric handle or a window-title substring.
         if identifier.strip().isdigit():
             return await asyncio.to_thread(focus_window, int(identifier))
         return await asyncio.to_thread(focus_window_by_title, identifier)
+
+    async def set_window_state(self, identifier: str, state: str) -> dict[str, Any]:
+        import asyncio
+        if identifier.strip().isdigit():
+            handle = int(identifier)
+            await asyncio.to_thread(set_window_state, handle, state)
+            return {"handle": handle, "state": state}
+        info = await asyncio.to_thread(set_window_state_by_title, identifier, state)
+        return {"handle": info.handle, "title": info.title, "state": state}
 
 
 __all__ = [
@@ -171,4 +223,6 @@ __all__ = [
     "focus_window",
     "focus_window_by_title",
     "list_windows",
+    "set_window_state",
+    "set_window_state_by_title",
 ]

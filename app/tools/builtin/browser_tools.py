@@ -233,6 +233,21 @@ def build_browser_tools(
     profiles: tuple[BrowserProfile, ...],
 ) -> tuple[Tool, ...]:
     """Build the tool set for every installed Chromium browser."""
+    
+    # If the extension is connected, hide the CDP tab tools entirely.
+    # The extension does everything CDP does for tabs, plus more, and
+    # does not require the debug port. Having both visible confused the
+    # model.
+    try:
+        from app.automation.chrome_extension_bridge import get_bridge
+        bridge = get_bridge()
+        for profile in profiles:
+            if bridge.is_available(profile.name):
+                # Skip this profile's CDP tools — extension covers it.
+                continue
+    except Exception:
+        pass
+    
     tools: list[Tool] = []
     for profile in profiles:
         if not profile.is_installed():
@@ -385,6 +400,14 @@ class BrowserEvalJsTool(BrowserToolBase):
     }
 
     def is_available(self) -> bool:
+        # Hide CDP tools when the extension covers this browser — one
+        # family at a time keeps the model from mixing tool names.
+        try:
+            from app.automation.chrome_extension_bridge import get_bridge
+            if get_bridge().is_available(self._profile.name):
+                return False
+        except Exception:
+            pass
         return self._devtools.is_available()
 
     async def execute(self, *, tab_match: str, javascript: str) -> dict[str, Any]:

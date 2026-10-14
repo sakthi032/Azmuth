@@ -1,0 +1,23 @@
+# SearXNG settings for Azmuth — private JSON API instance
+use_default_settings: true
+
+server:
+  base_url: "http://localhost:8888/"
+  secret_key: "CHANGE_ME_TO_A_RANDOM_STRING_USE_OPENSSL"
+  limiter: false          # disabled — private instance, no rate limiting needed
+  public_instance: false  # not a public instance
+  image_proxy: false      # not needed for API use
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json                # ← THE CRITICAL LINE — enables ?format=json
+
+ui:
+  static_use_hash: true
+
+redis:
+  url: redis://redis:6379/0

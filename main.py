@@ -39,7 +39,7 @@ def _status_lines(settings: Settings) -> list[str]:
         f" (default: {settings.default_language})",
         f"DATA ROOT       {settings.paths.data}",
         f"LLM PROVIDER    {settings.llm_provider}",
-        f"SEARCH PROVIDER {settings.search_provider}",
+        f"SEARCH PROVIDERS {' → '.join(settings.search_provider_order)}",
         "",
         "All Phase 1 steps implemented.",
         "",

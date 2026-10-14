@@ -35,7 +35,7 @@ PRIMARY_LANGUAGES: Final[tuple[str, ...]] = ("ta", "en")
 
 #: Project root, derived from this file's location: app/config/settings.py
 _PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
-
+_DEFAULT_SEARXNG_URL: Final[str] = "http://localhost:8888"
 
 # --------------------------------------------------------------------------
 # Paths
@@ -136,6 +136,14 @@ class Settings:
     # ---- Search ---------------------------------------------------------
     search_provider: str
     search_api_key: str | None
+    # ---- Search: provider order (tiered fallback) -----------------------
+    search_provider_order: tuple[str, ...]
+
+    # ---- Search: SearXNG ------------------------------------------------
+    searxng_base_url: str
+    searxng_timeout_seconds: float
+    searxng_language: str
+    searxng_api_key: str | None
 
     # ---- Voice ----------------------------------------------------------
     stt_provider: str
@@ -172,6 +180,14 @@ class Settings:
     session_ttl_minutes: int
     task_max_concurrent: int
 
+    # ---- Location -------------------------------------------------------
+    location_city: str | None
+    location_region: str | None
+    location_country: str | None
+    location_country_code: str | None
+    location_timezone: str | None
+    location_currency: str | None
+    location_units: str
     paths: Paths
 
     # -- helpers ----------------------------------------------------------
@@ -216,6 +232,11 @@ class Settings:
             "postgres_password": "***redacted***" if self.postgres_password else None,
             "postgres_schema": self.postgres_schema,
             "file_sandbox_roots": list(self.file_sandbox_roots),
+            "search_provider_order": list(self.search_provider_order),
+            "searxng_base_url": self.searxng_base_url,
+            "searxng_timeout_seconds": self.searxng_timeout_seconds,
+            "searxng_language": self.searxng_language,
+            "searxng_api_key": "***redacted***" if self.searxng_api_key else None,
         }
 
 
@@ -408,6 +429,21 @@ def load_settings(
             _get_str(env, "SEARCH_PROVIDER", "null") or "null"
         ).lower(),
         search_api_key=_get_str(env, "SEARCH_API_KEY"),
+        search_provider_order=(
+            _get_csv(env, "SEARCH_PROVIDER_ORDER")
+            or ("searxng", "duckduckgo", "null")
+        ),
+        searxng_base_url=(
+            _get_str(env, "SEARXNG_BASE_URL", _DEFAULT_SEARXNG_URL)
+            or _DEFAULT_SEARXNG_URL
+        ),
+        searxng_timeout_seconds=_get_float(
+            env, "SEARXNG_TIMEOUT_SECONDS", 15.0, minimum=0.1
+        ),
+        searxng_language=(
+            _get_str(env, "SEARXNG_LANGUAGE", "en") or "en"
+        ).lower(),
+        searxng_api_key=_get_str(env, "SEARXNG_API_KEY"),
         stt_provider=(_get_str(env, "STT_PROVIDER", "null") or "null").lower(),
         tts_provider=(_get_str(env, "TTS_PROVIDER", "null") or "null").lower(),
         wake_word_provider=(
@@ -445,6 +481,15 @@ def load_settings(
         file_sandbox_roots=tuple(
             _get_csv(env, "FILE_SANDBOX_ROOTS")
         ) or (str(_PROJECT_ROOT), str(Path.home())),
+
+        location_city=_get_str(env, "AZMUTH_LOCATION_CITY"),
+        location_region=_get_str(env, "AZMUTH_LOCATION_REGION"),
+        location_country=_get_str(env, "AZMUTH_LOCATION_COUNTRY"),
+        location_country_code=_get_str(env, "AZMUTH_LOCATION_COUNTRY_CODE"),
+        location_timezone=_get_str(env, "AZMUTH_LOCATION_TIMEZONE"),
+        location_currency=_get_str(env, "AZMUTH_LOCATION_CURRENCY"),
+        location_units=(_get_str(env, "AZMUTH_LOCATION_UNITS", "metric") or "metric").lower(),
+        
     )
 
     if default_language not in supported:

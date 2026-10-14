@@ -7,7 +7,7 @@ so callers can distinguish *unavailable* from *nothing found*.
 """
 
 from __future__ import annotations
-
+from typing import Any, ClassVar
 from app.core.errors import ProviderUnavailableError
 from app.automation.base import (
     AppLaunchResult,
@@ -71,4 +71,7 @@ class NullAutomation(WindowsAutomation):
         raise ProviderUnavailableError(self._reason)
 
     async def focus_window(self, identifier: str) -> bool:
+        raise ProviderUnavailableError(self._reason)
+
+    async def set_window_state(self, identifier: str, state: str) -> dict[str, Any]:
         raise ProviderUnavailableError(self._reason)

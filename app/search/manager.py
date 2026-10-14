@@ -1,17 +1,16 @@
-
 """Search facade.
 
-Wraps a provider and enforces the security convention that no external
-content reaches the brain in a form that could impersonate instructions.
-Its two responsibilities:
+Wraps one or more providers behind a tiered fallback chain and enforces
+the security convention that no external content reaches the brain in a
+form that could impersonate instructions. Responsibilities:
 
-* resolve a provider from the registry by name,
-* run a query and return a :class:`SearchResponse` that already contains a
-  sanitised reference block ready for the prompt.
+* resolve providers from the registry by name,
+* try them in configured order, treating empty results as failure,
+* return a SearchResponse that already carries a sanitised reference block.
 
-Callers (the brain) use :meth:`SearchManager.search` and never see raw
-snippets in isolation - the response bundles structured results *and* the
-single safe block.
+Callers (the brain) use SearchManager.search() and never see raw snippets
+in isolation - the response bundles structured results *and* the single
+safe block.
 """
 
 from __future__ import annotations
@@ -22,27 +21,49 @@ from app.config.logging_setup import get_logger
 from app.core.errors import (
     ProviderError,
     ProviderNotFoundError,
-    ProviderUnavailableError,
 )
 from app.core.registry import Registry
 from app.search.base import SearchProvider
-from app.search.models import SearchQuery, SearchResponse, SearchResult
-from app.search.sanitizer import build_reference_block
+from app.search.models import SearchQuery, SearchResponse
 
 logger = get_logger("search")
 
 
+def _default_fallback_order(primary: str) -> tuple[str, ...]:
+    """Build the fallback chain: primary first, then settings order minus primary."""
+    try:
+        from app.config.settings import load_settings
+
+        settings = load_settings(create_directories=False)
+        order = tuple(settings.search_provider_order or ())
+    except Exception:  # noqa: BLE001
+        order = ()
+
+    seen: list[str] = []
+    for name in (primary, *order):
+        if name and name not in seen:
+            seen.append(name)
+    return tuple(seen)
+
+
 class SearchManager:
-    """Provider selection and safe result handling."""
+    """Provider selection with tiered fallback and safe result handling."""
 
     def __init__(
         self,
         provider_name: str,
         registry: Registry[SearchProvider],
+        *,
+        fallback_order: tuple[str, ...] | None = None,
     ) -> None:
         self._provider_name = provider_name
         self._registry = registry
         self._provider: SearchProvider | None = None
+        self._fallback_order = (
+            fallback_order
+            if fallback_order is not None
+            else _default_fallback_order(provider_name)
+        )
 
     # -- introspection -----------------------------------------------------
     @property
@@ -62,9 +83,21 @@ class SearchManager:
             )
         return self._provider
 
+    @property
+    def fallback_order(self) -> tuple[str, ...]:
+        return self._fallback_order
+
+    def reset(self) -> None:
+        self._provider = None
+
+    # -- health ------------------------------------------------------------
     def is_available(self) -> bool:
+        """Best-effort sync check of the *primary* provider only.
+
+        Fallback providers are probed lazily during :meth:`search`.
+        """
         try:
-            return self.provider.is_available()
+            result = self.provider.is_available()
         except ProviderNotFoundError:
             return False
         except Exception:  # noqa: BLE001
@@ -74,85 +107,90 @@ class SearchManager:
             )
             return False
 
-    def reset(self) -> None:
-        self._provider = None
+        # Some providers may implement is_available as async by mistake;
+        # a coroutine object is truthy but means nothing here.
+        if hasattr(result, "__await__"):
+            return True  # assume reachable; search() will confirm
+        return bool(result)
 
     # -- search ------------------------------------------------------------
     async def search(self, query: SearchQuery) -> SearchResponse:
-        """Run ``query`` and return a sanitised response.
-
-        Never raises for an empty result set. Raises only for a genuinely
-        unusable provider (unknown name, transport failure).
-        """
+        """Try providers in fallback order until one returns results."""
         started = time.perf_counter()
+        last_error: Exception | None = None
+        last_provider_used: str = "none"
 
-        try:
-            provider = self.provider
-        except ProviderNotFoundError:
-            raise
-        if not provider.is_available():
-            raise ProviderUnavailableError(
-                f"search provider {provider.name!r} is not available"
-            )
+        for name in self._fallback_order:
+            try:
+                provider = self._registry.create(name)
+            except ProviderNotFoundError:
+                logger.debug(
+                    "provider %r not registered — skipping", name,
+                    extra={"event": "SEARCH_PROVIDER_MISSING", "provider": name},
+                )
+                continue
 
-        try:
-            raw = await provider.search(query)
-        except (ProviderUnavailableError, ProviderNotFoundError):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "search failed",
-                extra={"event": "SEARCH_FAILED", "provider": provider.name},
-            )
-            raise ProviderError(f"search failed: {exc}") from exc
-
-        # Defensive: providers might return a list containing non-SearchResult
-        # items (e.g. a plugin bug). Drop anything that is not the right type
-        # rather than crashing the conversation.
-        results: list[SearchResult] = []
-        for item in raw:
-            if isinstance(item, SearchResult):
-                results.append(item)
-            else:
+            try:
+                response = await provider.search(query)
+            except ProviderError as exc:
+                last_error = exc
                 logger.warning(
-                    "search provider returned unexpected item type",
+                    "search via %s failed: %s", name, exc,
                     extra={
-                        "event": "SEARCH_BAD_ITEM",
-                        "provider": provider.name,
-                        "type": type(item).__name__,
+                        "event": "SEARCH_PROVIDER_FAILED",
+                        "provider": name,
+                        "error": str(exc),
                     },
                 )
+                continue
 
-        # Rank by provider order but cap at the requested limit.
-        results = results[: query.max_results]
+            if response.results:
+                logger.info(
+                    "search via %s returned %d results",
+                    name, len(response.results),
+                    extra={
+                        "event": "SEARCH_SUCCESS",
+                        "provider": name,
+                        "count": len(response.results),
+                    },
+                )
+                return response
 
-        reference_block = build_reference_block(tuple(results))
-        elapsed_ms = (time.perf_counter() - started) * 1000
+            last_provider_used = name
+            logger.warning(
+                "search via %s returned 0 results — falling through",
+                name,
+                extra={"event": "SEARCH_EMPTY", "provider": name},
+            )
 
-        response = SearchResponse(
+        # Every provider failed or returned empty.
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        error_message = (
+            str(last_error)
+            if last_error is not None
+            else "all search providers returned no results"
+        )
+        logger.warning(
+            "search exhausted all providers",
+            extra={"event": "SEARCH_EXHAUSTED", "error": error_message},
+        )
+
+        return SearchResponse(
             query=query,
-            results=tuple(results),
-            provider=provider.name,
-            reference_block=reference_block,
-            has_reference=bool(reference_block),
+            results=(),
+            provider=last_provider_used,
+            reference_block="",
+            has_reference=False,
             elapsed_ms=elapsed_ms,
+            error=error_message,
         )
-        logger.info(
-            "search completed",
-            extra={
-                "event": "SEARCH_COMPLETED",
-                "provider": provider.name,
-                "result_count": len(results),
-                "elapsed_ms": round(elapsed_ms, 3),
-            },
-        )
-        return response
 
 
 def build_search_manager(
     provider_name: str,
     *,
     registry: Registry[SearchProvider] | None = None,
+    fallback_order: tuple[str, ...] | None = None,
 ) -> SearchManager:
     """Construct a :class:`SearchManager` with the default registry."""
     from app.search.providers import build_search_registry
@@ -160,4 +198,5 @@ def build_search_manager(
     return SearchManager(
         provider_name,
         registry if registry is not None else build_search_registry(),
+        fallback_order=fallback_order,
     )

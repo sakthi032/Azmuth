@@ -25,6 +25,7 @@ from app.tools.builtin.system import (
     ClickAtTool,
     ClickElementTool,
     CloseApplicationTool,
+    FocusWindowTool,
     GetCursorPositionTool,
     ListProcessesTool,
     ListUIElementsTool,
@@ -37,9 +38,9 @@ from app.tools.builtin.system import (
     ScrollTool,
     SetSettingTool,
     SetToggleTool,
+    SetWindowStateTool,
     TypeTextTool,
 )
-
 
 def build_builtin_tools(
     *,
@@ -72,6 +73,8 @@ def build_builtin_tools(
             ListProcessesTool(automation),
             CloseApplicationTool(automation),
             ListWindowsTool(automation),
+            FocusWindowTool(automation),
+            SetWindowStateTool(automation),
         ])
 
     if settings is not None:

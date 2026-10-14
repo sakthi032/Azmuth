@@ -302,8 +302,8 @@ def build_azmuth(
     sess = sessions or SessionManager(settings)
 
     # ---- search ----------------------------------------------------------
-    search_manager = search or build_search_manager(settings.search_provider)
-
+    primary = settings.search_provider_order[0] if settings.search_provider_order else "null"
+    search_manager = build_search_manager(primary)
     # ---- automation ------------------------------------------------------
     from app.automation import WindowsAutomationImpl
     automation = WindowsAutomationImpl()
@@ -365,12 +365,12 @@ def build_azmuth(
     )
 
     # ---- identity & location --------------------------------------------
-    from app.brain.context import LocationService
+    from app.brain.context import build_location_service
     from app.brain.identity import ensure_identity_dir, load_identity_block
 
     ensure_identity_dir(settings)
     identity_block = load_identity_block(settings)
-    location_service = LocationService()
+    location_service = build_location_service(settings)
 
     # ---- brain -----------------------------------------------------------
     brain = Brain(

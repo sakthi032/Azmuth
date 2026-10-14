@@ -845,6 +845,48 @@ class ChromeOpenProfileTool(Tool):
         await asyncio.to_thread(_launch)
         return {"launched": directory, "url": url}
 
+
+class SetWindowStateTool(Tool):
+    """Set the state of a window: maximize, minimize, restore, or show."""
+
+    name: ClassVar[str] = "set_window_state"
+    description: ClassVar[str] = (
+        "Set a window's state. Use 'maximize' to fill the screen, "
+        "'minimize' to hide to the taskbar, 'restore' to un-maximize or "
+        "un-minimize, or 'show' to reveal a hidden window. Accepts "
+        "either a window title substring or the numeric handle from "
+        "list_windows. Focuses the window after maximizing or restoring."
+    )
+    parameters: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "identifier": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Window title substring or numeric handle.",
+            },
+            "state": {
+                "type": "string",
+                "enum": ["maximize", "minimize", "restore", "show"],
+            },
+        },
+        "required": ["identifier", "state"],
+        "additionalProperties": False,
+    }
+    capability: ClassVar[Capability] = Capability.ADVANCED_AUTOMATION
+    risk_level: ClassVar[RiskLevel] = RiskLevel.LOW
+    requires_confirmation: ClassVar[bool] = False
+    can_run_async: ClassVar[bool] = True
+
+    def __init__(self, automation: WindowsAutomation) -> None:
+        self._automation = automation
+
+    def is_available(self) -> bool:
+        return self._automation.is_available()
+
+    async def execute(self, *, identifier: str, state: str) -> dict[str, Any]:
+        return await self._automation.set_window_state(identifier, state)
  
 __all__ = [
     "ClickAtTool",
