@@ -20,6 +20,11 @@ from app.tools.builtin.files import (
     FileWriteTool,
 )
 from app.tools.builtin.get_time import GetTimeTool
+from app.tools.builtin.screen_state import (
+    GetScreenStateTool,
+    GetWindowStateTool,
+    VerifyElementTool,
+)
 from app.tools.builtin.search_web import SearchWebTool
 from app.tools.builtin.system import (
     ClickAtTool,
@@ -40,7 +45,9 @@ from app.tools.builtin.system import (
     SetToggleTool,
     SetWindowStateTool,
     TypeTextTool,
+    TypeIntoElementTool,
 )
+
 
 def build_builtin_tools(
     *,
@@ -83,9 +90,15 @@ def build_builtin_tools(
     if uia is not None:
         tools.extend([
             OpenSettingsPageTool(),
+            # -- Observation ------------------------------------------------
+            GetScreenStateTool(uia),
+            GetWindowStateTool(uia),
+            VerifyElementTool(uia),
+            # -- Discovery / search -----------------------------------------
+            ListUIElementsTool(uia),
+            # -- Action -----------------------------------------------------
             SetToggleTool(uia),
             ClickElementTool(uia),
-            ListUIElementsTool(uia),
         ])
 
     if input_ctl is not None:
@@ -97,7 +110,10 @@ def build_builtin_tools(
             ScrollTool(input_ctl),
             GetCursorPositionTool(input_ctl),
         ])
-
+        
+    if uia is not None and input_ctl is not None:
+        tools.append(TypeIntoElementTool(uia, input_ctl))
+        
     if files is not None:
         tools.extend([
             FileReadTool(files),

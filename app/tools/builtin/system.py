@@ -1,4 +1,3 @@
-
 """Tools that interact with the Windows system.
 
 Two categories live here:
@@ -15,16 +14,18 @@ The AI decides which to call. The code provides the primitives.
 
 from __future__ import annotations
 
+import asyncio                              # ← BUG 1 FIX: was missing
 from typing import Any, ClassVar
 
 from app.automation.base import WindowsAutomation
+from app.automation.discovery import AppDiscovery
 from app.automation.input import InputController
 from app.automation.settings import SettingsController
 from app.automation.uia import UIAutomationController
 from app.core.errors import AutomationError, ProviderUnavailableError
 from app.security.capabilities import Capability
 from app.tools.base import RiskLevel, Tool
-from app.automation.discovery import AppDiscovery
+
 
 # --------------------------------------------------------------------------
 # Application control
@@ -204,8 +205,6 @@ class ListWindowsTool(Tool):
         return self._automation.is_available()
 
     async def execute(self) -> dict[str, Any]:
-        import asyncio
-
         from app.automation.windows_mgmt import list_windows
 
         windows = await asyncio.to_thread(list_windows)
@@ -304,7 +303,6 @@ class OpenSettingsPageTool(Tool):
     can_run_async: ClassVar[bool] = True
 
     async def execute(self, *, page: str) -> dict[str, Any]:
-        import asyncio
         import os
 
         uri = f"ms-settings:{page}"
@@ -469,6 +467,13 @@ class TypeTextTool(Tool):
         return self._input.is_available()
 
     async def execute(self, *, text: str) -> dict[str, Any]:
+        from app.automation.self_guard import is_self_foreground
+        if is_self_foreground():
+            raise AutomationError(
+                "refusing to type: Azmuth's own window currently has focus. "
+                "Focus the target application first (focus_window), then "
+                "retry. Typing here would create a feedback loop."
+            )
         await self._input.type_text(text)
         return {"typed": len(text)}
 
@@ -502,6 +507,16 @@ class PressKeysTool(Tool):
         return self._input.is_available()
 
     async def execute(self, *, keys: str) -> dict[str, Any]:
+        from app.automation.self_guard import is_self_foreground
+
+        destructive = any(
+            token in keys.lower()
+            for token in ("alt+f4", "ctrl+w", "ctrl+q", "alt+esc")
+        )
+        if destructive and is_self_foreground():
+            raise AutomationError(
+                f"refusing to send {keys!r} to Azmuth's own window."
+            )
         await self._input.press_keys(keys)
         return {"pressed": keys}
 
@@ -587,6 +602,13 @@ class ClickAtTool(Tool):
         button: str = "left",
         double: bool = False,
     ) -> dict[str, Any]:
+        from app.automation.self_guard import is_self_foreground
+        if is_self_foreground():
+            raise AutomationError(
+                "refusing to click: Azmuth's own window has focus. "
+                "Clicking there could trigger unintended UI actions. "
+                "Focus the target application first."
+            )
         if double:
             await self._input.double_click(x, y)
         else:
@@ -655,8 +677,8 @@ class ScrollTool(Tool):
     async def execute(self, *, amount: int) -> dict[str, Any]:
         await self._input.scroll(amount)
         return {"scrolled": amount}
-    
-    
+
+
 class FocusWindowTool(Tool):
     """Bring a window to the foreground."""
 
@@ -694,8 +716,7 @@ class FocusWindowTool(Tool):
     async def execute(self, *, identifier: str) -> dict[str, Any]:
         focused = await self._automation.focus_window(identifier)
         return {"identifier": identifier, "focused": focused}
-    
-    
+
 
 class ListInstalledAppsTool(Tool):
     """List applications installed on this machine."""
@@ -724,7 +745,7 @@ class ListInstalledAppsTool(Tool):
     requires_confirmation: ClassVar[bool] = False
     can_run_async: ClassVar[bool] = True
 
-    def __init__(self, discovery: "AppDiscovery") -> None:
+    def __init__(self, discovery: AppDiscovery) -> None:
         self._discovery = discovery
 
     def is_available(self) -> bool:
@@ -734,7 +755,6 @@ class ListInstalledAppsTool(Tool):
     async def execute(
         self, *, refresh: bool = False, query: str | None = None
     ) -> dict[str, Any]:
-        import asyncio
         apps = await asyncio.to_thread(
             self._discovery.list_installed, force=refresh
         )
@@ -746,7 +766,7 @@ class ListInstalledAppsTool(Tool):
             "apps": [a.as_dict() for a in apps],
         }
 
-   
+
 class ListChromeProfilesTool(Tool):
     """List Chrome profiles installed on this machine."""
 
@@ -769,7 +789,6 @@ class ListChromeProfilesTool(Tool):
         return sys.platform == "win32"
 
     async def execute(self) -> dict[str, Any]:
-        import asyncio
         from app.automation.chrome_profiles import list_chrome_profiles
         profiles = await asyncio.to_thread(list_chrome_profiles)
         return {"count": len(profiles), "profiles": [p.as_dict() for p in profiles]}
@@ -803,7 +822,6 @@ class ChromeOpenProfileTool(Tool):
     async def execute(
         self, *, directory: str, url: str | None = None
     ) -> dict[str, Any]:
-        import asyncio
         import shutil
         import subprocess
         import sys
@@ -887,12 +905,181 @@ class SetWindowStateTool(Tool):
 
     async def execute(self, *, identifier: str, state: str) -> dict[str, Any]:
         return await self._automation.set_window_state(identifier, state)
- 
-__all__ = [
+
+
+# --------------------------------------------------------------------------
+# Atomic type-into-element (fixes the click-then-type race)
+# --------------------------------------------------------------------------
+class TypeIntoElementTool(Tool):
+    """Focus a named edit field and type into it — atomic, verified."""
+
+    name: ClassVar[str] = "type_into_element"
+    description: ClassVar[str] = (
+        "Focus a text field or editor and type into it in one atomic "
+        "step. Prefer this over click_element + type_text for any input "
+        "field: it locates the field, clicks its center, verifies it is "
+        "an edit target, then types. If the field cannot be identified, "
+        "the tool refuses and reports what it saw — it will never type "
+        "into an unknown target."
+    )
+    parameters: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "element_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": (
+                    "The visible name of the edit field. On Win11 Notepad "
+                    "the text area has no name — pass any string like "
+                    "'editor' and the tool will fall back to the first "
+                    "edit-type control it finds."
+                ),
+            },
+            "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "clear_first": {
+                "type": "boolean",
+                "description": (
+                    "If true (default), select-all then type. "
+                    "If false, append at the current cursor position."
+                ),
+            },
+            "submit": {
+                "type": "boolean",
+                "description": "If true, press Enter after typing.",
+            },
+        },
+        "required": ["element_name", "text"],
+        "additionalProperties": False,
+    }
+    capability: ClassVar[Capability] = Capability.ADVANCED_AUTOMATION
+    risk_level: ClassVar[RiskLevel] = RiskLevel.HIGH
+    requires_confirmation: ClassVar[bool] = True
+    can_run_async: ClassVar[bool] = True
+
+    def __init__(
+        self,
+        uia: UIAutomationController,
+        input_ctl: InputController,
+    ) -> None:
+        self._uia = uia
+        self._input = input_ctl
+
+    def is_available(self) -> bool:
+        return self._uia.is_available() and self._input.is_available()
+
+    async def execute(
+        self,
+        *,
+        element_name: str,
+        text: str,
+        clear_first: bool = True,
+        submit: bool = False,
+    ) -> dict[str, Any]:
+        from app.automation.self_guard import is_self_foreground
+
+        if is_self_foreground():
+            raise AutomationError(
+                "refusing to type: Azmuth's own window has focus."
+            )
+
+        # 1. Observe — walk the focused window's full tree.
+        #    Use get_window_tree (not find_elements) so unnamed
+        #    edit controls are included via synthesized names.
+        tree = await self._uia.get_window_tree(
+            window=None, interactive_only=False, limit=200
+        )
+        elements = tree.get("elements") or []
+        if not elements:
+            raise AutomationError(
+                "no UI elements in the focused window. Focus the target "
+                "app first with focus_window."
+            )
+
+        # 2. Choose the target.
+        needle = (element_name or "").strip().lower()
+        edit_types = ("edit", "document", "richtext", "text")
+
+        def _is_edit(e: dict[str, Any]) -> bool:
+            c = (e.get("control_type") or "").lower()
+            return any(k in c for k in edit_types)
+
+        def _name_hits(e: dict[str, Any]) -> bool:
+            n = (e.get("name") or "").lower()
+            return bool(needle) and (needle in n or n in needle)
+
+        named_edits = [e for e in elements if _name_hits(e) and _is_edit(e)]
+        named_any = [e for e in elements if _name_hits(e)]
+        edits = [e for e in elements if _is_edit(e)]
+
+        chosen = (
+            (named_edits or named_any or edits or [None])[0]
+        )
+        if chosen is None:
+            sample = [
+                (e.get("name"), e.get("control_type"))
+                for e in elements[:12]
+            ]
+            raise AutomationError(
+                f"no edit-type control and no element matching "
+                f"{element_name!r}. Visible elements: {sample}"
+            )
+
+        # 3. Click the element's center to give it focus.
+        rect = chosen.get("rect") or chosen.get("bounding_rect")
+        if not rect or len(rect) < 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
+            raise AutomationError(
+                f"element {chosen.get('name')!r} has no usable "
+                f"bounding box; cannot focus by click. "
+                f"This usually means the UIA tree exposed the control "
+                f"without a rect — patch _control_to_info to populate "
+                f"BoundingRectangle."
+            )
+        cx = (rect[0] + rect[2]) // 2
+        cy = (rect[1] + rect[3]) // 2
+        await self._input.click(cx, cy)
+        await asyncio.sleep(0.2)
+
+        # 4. Optionally clear existing content, then type.
+        if clear_first:
+            await self._input.press_keys("ctrl+a")
+            await asyncio.sleep(0.05)
+
+        # After `chosen` is selected, extract the HWND from the element's
+        # window_handle field.
+        target_hwnd = chosen.get("window_handle") or None
+        
+
+        await self._input.click(cx, cy)
+        await asyncio.sleep(0.2)
+
+        if clear_first:
+            await self._input.press_keys("ctrl+a")
+            await asyncio.sleep(0.05)
+
+        await self._input.type_text(text, target_hwnd=target_hwnd)
+
+        if submit:
+            await asyncio.sleep(0.1)
+            await self._input.press_keys("enter")
+
+        return {
+            "element": chosen.get("name") or element_name,
+            "control_type": chosen.get("control_type"),
+            "typed": len(text),
+            "submitted": submit,
+        }
+
+
+__all__ = [                                # ← BUG 2 FIX: added TypeIntoElementTool
+    "ChromeOpenProfileTool",
     "ClickAtTool",
     "ClickElementTool",
     "CloseApplicationTool",
+    "FocusWindowTool",
     "GetCursorPositionTool",
+    "ListChromeProfilesTool",
+    "ListInstalledAppsTool",
     "ListProcessesTool",
     "ListUIElementsTool",
     "ListWindowsTool",
@@ -904,5 +1091,7 @@ __all__ = [
     "ScrollTool",
     "SetSettingTool",
     "SetToggleTool",
+    "SetWindowStateTool",
+    "TypeIntoElementTool",
     "TypeTextTool",
 ]

@@ -371,6 +371,7 @@ def build_azmuth(
     ensure_identity_dir(settings)
     identity_block = load_identity_block(settings)
     location_service = build_location_service(settings)
+    
 
     # ---- brain -----------------------------------------------------------
     brain = Brain(

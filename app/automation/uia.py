@@ -70,9 +70,25 @@ class ElementInfo:
     is_offscreen: bool
     is_enabled: bool
     score: float = 0.0
+    # -- additions -----------------------------------------------------
+    bounding_rect: tuple[int, int, int, int] = (0, 0, 0, 0)
+    window_title: str = ""
+    window_handle: int = 0
+    depth: int = 0
+    value: str = ""
+
+    @property
+    def is_interactive(self) -> bool:
+        """True for control types the model can act on."""
+        t = self.control_type.lower()
+        return any(k in t for k in (
+            "button", "edit", "combobox", "listitem", "menuitem",
+            "tabitem", "checkbox", "radiobutton", "hyperlink",
+            "treeitem", "slider", "spinner", "splitbutton",
+        ))
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "name": self.name,
             "control_type": self.control_type,
             "automation_id": self.automation_id,
@@ -81,6 +97,13 @@ class ElementInfo:
             "is_enabled": self.is_enabled,
             "score": round(self.score, 2),
         }
+        if self.bounding_rect != (0, 0, 0, 0):
+            d["rect"] = list(self.bounding_rect)
+        if self.window_title:
+            d["window"] = self.window_title
+        if self.value:
+            d["value"] = self.value
+        return d
 
 
 def _load_uia():
@@ -97,6 +120,16 @@ import threading
 
 _com_initialized = threading.local()
 
+
+from functools import wraps
+
+def _requires_com(fn):
+    """Ensure COM is initialized on whatever thread runs this function."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        _ensure_com_initialized()
+        return fn(*args, **kwargs)
+    return wrapper
 
 def _ensure_com_initialized() -> None:
     """Initialize COM on the current thread, exactly once.
@@ -140,7 +173,210 @@ class UIAutomationController:
             return True
         except ProviderUnavailableError:
             return False
+    # -- window-scoped discovery ------------------------------------------
+    async def get_window_tree(
+        self,
+        *,
+        window: str | None = None,
+        interactive_only: bool = True,
+        max_depth: int = 8,
+        limit: int = 120,
+    ) -> dict[str, Any]:
+        """Return the UIA tree of a window (or the focused one).
 
+        ``window=None`` uses the foreground window. ``window="notepad"``
+        matches the first top-level window whose title contains that text.
+        Only elements that are enabled and on-screen are returned.
+        """
+        import asyncio
+
+        @_requires_com
+        def _tree() -> dict[str, Any]:
+            uia = _load_uia()
+            _ensure_com_initialized()
+            uia = _load_uia()
+
+            if window:
+                root, title, handle = self._find_top_window(uia, window)
+                if root is None:
+                    visible = self._visible_window_titles(uia)
+                    raise AutomationError(
+                        f"no window matched {window!r}. "
+                        f"Visible top-level windows: {visible}"
+                    )
+            else:
+                root = uia.GetForegroundControl()
+                if root is None:
+                    raise AutomationError("no foreground window")
+                try:
+                    title = (root.Name or "").strip()
+                    handle = int(getattr(root, "NativeWindowHandle", 0) or 0)
+                except Exception:
+                    title, handle = "", 0
+
+            elements: list[ElementInfo] = []
+            try:
+                for ctrl, depth in uia.WalkControl(root, maxDepth=max_depth):
+                    if depth == 0:
+                        continue
+                    if len(elements) >= limit:
+                        break
+                    try:
+                        info = self._control_to_info(
+                            ctrl, depth=depth, title=title, handle=handle
+                        )
+                    except Exception:
+                        continue
+                    if info is None:
+                        continue
+                    if info.is_offscreen or not info.is_enabled:
+                        continue
+                    if interactive_only and not info.is_interactive:
+                        continue
+                    elements.append(info)
+            except Exception:  # noqa: BLE001
+                pass
+
+            return {
+                "window": title,
+                "handle": handle,
+                "count": len(elements),
+                "elements": [e.as_dict() for e in elements],
+            }
+
+        return await asyncio.to_thread(_tree)
+
+    async def read_focused_document(self) -> str | None:
+        """Read the text of the focused document control.
+
+        Returns None if no TextPattern is available — in which case the
+        caller must verify some other way. Does NOT raise on failure;
+        this is a best-effort read.
+        """
+        import asyncio
+
+        @_requires_com
+        def _read() -> str | None:
+            uia = _load_uia()
+            root = uia.GetForegroundControl()
+            if root is None:
+                return None
+            try:
+                for ctrl, _depth in uia.WalkControl(root, maxDepth=6):
+                    try:
+                        ctype = (ctrl.ControlTypeName or "").lower()
+                    except Exception:
+                        continue
+                    if "document" not in ctype and "edit" not in ctype:
+                        continue
+                    if not getattr(ctrl, "IsTextPatternAvailable", False):
+                        continue
+                    try:
+                        pattern = ctrl.GetTextPattern()
+                        rng = pattern.DocumentRange
+                        text = rng.GetText(-1) or ""
+                        return text
+                    except Exception:
+                        continue
+            except Exception:
+                return None
+            return None
+
+        return await asyncio.to_thread(_read)
+
+    # -- internal helpers --------------------------------------------------
+    @staticmethod
+    def _find_top_window(uia, title_substring: str):
+        root = uia.GetRootControl()
+        needle = title_substring.strip().lower()
+        try:
+            children = root.GetChildren()
+        except Exception:
+            return None, "", 0
+        for child in children:
+            try:
+                name = (child.Name or "").strip()
+            except Exception:
+                continue
+            if needle in name.lower():
+                handle = int(getattr(child, "NativeWindowHandle", 0) or 0)
+                return child, name, handle
+        return None, "", 0
+
+    @staticmethod
+    def _visible_window_titles(uia, limit: int = 12) -> list[str]:
+        root = uia.GetRootControl()
+        out: list[str] = []
+        try:
+            for child in root.GetChildren():
+                try:
+                    name = (child.Name or "").strip()
+                except Exception:
+                    continue
+                if not name:
+                    continue
+                if name not in out:
+                    out.append(name)
+                if len(out) >= limit:
+                    break
+        except Exception:
+            pass
+        return out
+
+    @staticmethod
+    def _control_to_info(
+        ctrl, *, depth: int, title: str, handle: int
+    ) -> ElementInfo | None:
+        try:
+            name = (ctrl.Name or "").strip()
+            ctype = ctrl.ControlTypeName or ""
+            cid = ctrl.AutomationId or ""
+            cclass = ctrl.ClassName or ""
+            offscreen = bool(getattr(ctrl, "IsOffscreen", False))
+            enabled = bool(getattr(ctrl, "IsEnabled", True))
+        except Exception:
+            return None
+
+        # Synthesize a name for unnamed edit-type controls so the model
+        # can find them. Win11 Notepad's RichEditD2DPT has no Name.
+        if not name:
+            ctype_lower = ctype.lower()
+            if "edit" in ctype_lower or "document" in ctype_lower:
+                name = f"<{ctype or 'Edit'}>"
+            elif "richtext" in cclass.lower():
+                name = "<RichText editor>"
+            else:
+                return None  # truly nameless non-edit control — skip
+
+        rect = (0, 0, 0, 0)
+        try:
+            r = ctrl.BoundingRectangle
+            if r and r.right > r.left and r.bottom > r.top:
+                rect = (int(r.left), int(r.top), int(r.right), int(r.bottom))
+        except Exception:
+            pass
+
+        value = ""
+        try:
+            vp = getattr(ctrl, "GetValuePattern", None) 
+            if vp and getattr(ctrl, "IsValuePatternAvailable", False):
+                value = str(vp().Value or "")[:200]
+        except Exception:
+            pass
+
+        return ElementInfo(
+            name=name,
+            control_type=ctype,
+            automation_id=cid,
+            class_name=cclass,
+            is_offscreen=offscreen,
+            is_enabled=enabled,
+            bounding_rect=rect,
+            window_title=title,
+            window_handle=handle,
+            depth=depth,
+            value=value,
+        )
     # -- discovery ---------------------------------------------------------
     async def find_elements(
         self,
@@ -149,23 +385,80 @@ class UIAutomationController:
         control_type: str | None = None,
         automation_id: str | None = None,
         limit: int = 20,
+        window: str | int | None = None,
     ) -> list[ElementInfo]:
+        """Find UI elements.
+
+        ``window`` scopes the search: pass a title substring or an HWND
+        to search only that window's subtree. If ``None``, searches the
+        whole desktop — which is what allows a similarly-named element
+        in another app to match. Always pass ``window`` when you know it.
+        """
         import asyncio
 
+        @_requires_com
         def _find() -> list[ElementInfo]:
-            _ensure_com_initialized()
             uia = _load_uia()
-            root = uia.GetRootControl()
+
+            if window is not None:
+                root = self._resolve_window_root(uia, window)
+                if root is None:
+                    raise AutomationError(
+                        f"no window matched {window!r}; "
+                        f"cannot scope element search"
+                    )
+            else:
+                root = uia.GetRootControl()
+
             found: list[ElementInfo] = []
-            self._walk(
-                root, found, name=name, control_type=control_type,
-                automation_id=automation_id, limit=limit * 4, depth=0,
-            )
-            # Rank by score, keep the best.
+            # Walk the root's CHILDREN, not the root itself — if the root
+            # is a window, we don't want to match its own title.
+            try:
+                children = root.GetChildren()
+            except Exception:
+                children = [root]
+            for child in children:
+                self._walk(
+                    child, found,
+                    name=name, control_type=control_type,
+                    automation_id=automation_id,
+                    limit=limit * 4, depth=0,
+                )
             found.sort(key=lambda e: (-e.score, e.name))
             return found[:limit]
 
         return await asyncio.to_thread(_find)
+
+    @staticmethod
+    def _resolve_window_root(uia, window: str | int):
+        """Return the UIA control for a window matched by title or HWND."""
+        root = uia.GetRootControl()
+        try:
+            children = root.GetChildren()
+        except Exception:
+            return None
+
+        # HWND match
+        if isinstance(window, int):
+            for child in children:
+                try:
+                    h = int(getattr(child, "NativeWindowHandle", 0) or 0)
+                except Exception:
+                    continue
+                if h == window:
+                    return child
+            return None
+
+        # Title substring match
+        needle = window.strip().lower()
+        for child in children:
+            try:
+                t = (child.Name or "").strip().lower()
+            except Exception:
+                continue
+            if needle and needle in t:
+                return child
+        return None
 
     def _walk(
         self,
@@ -234,6 +527,7 @@ class UIAutomationController:
     ) -> bool:
         import asyncio
 
+        @_requires_com
         def _invoke() -> bool:
             uia = _load_uia()
             root = uia.GetRootControl()
@@ -282,15 +576,18 @@ class UIAutomationController:
                     continue
 
             # Fall back to a physical click at the element's centre.
+            # Use SendInput via InputController — mouse_event is deprecated
+            # and doesn't give the target window's child controls keyboard
+            # focus on Windows 10/11.
             rect = best.BoundingRectangle
             cx = int((rect.left + rect.right) / 2)
             cy = int((rect.top + rect.bottom) / 2)
             try:
-                import ctypes
-                ctypes.windll.user32.SetCursorPos(cx, cy)
-                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
-                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
-            except Exception as exc:  # noqa: BLE001
+                import asyncio as _asyncio
+                from app.automation.input import InputController
+                ctl = InputController()
+                _asyncio.run(ctl.click(cx, cy))
+            except Exception as exc:
                 raise AutomationError(
                     f"element matched but could not be clicked: {exc}"
                 ) from exc
@@ -306,6 +603,7 @@ class UIAutomationController:
     async def set_toggle(self, *, name: str, on: bool) -> bool:
         import asyncio
 
+        @_requires_com
         def _set() -> bool:
             uia = _load_uia()
             root = uia.GetRootControl()
