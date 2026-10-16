@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.automation.resolver import TargetResolver
+from app.tools.builtin.visual import ClickVisualTool
 from app.automation.base import WindowsAutomation
 from app.automation.browsers import installed_profiles
 from app.automation.files import FileController
@@ -13,12 +15,6 @@ from app.tools.base import Tool
 from app.tools.builtin.browser_tools import build_browser_tools
 from app.tools.builtin.chrome_extension_tools import build_extension_tools
 from app.tools.builtin.echo import EchoTool
-from app.tools.builtin.files import (
-    FileDeleteTool,
-    FileListTool,
-    FileReadTool,
-    FileWriteTool,
-)
 from app.tools.builtin.get_time import GetTimeTool
 from app.tools.builtin.screen_state import (
     GetScreenStateTool,
@@ -47,6 +43,17 @@ from app.tools.builtin.system import (
     TypeTextTool,
     TypeIntoElementTool,
 )
+from app.tools.builtin.files import (
+    FileCopyTool,
+    FileDeleteTool,
+    FileListTool,
+    FileMakeDirTool,
+    FileMoveTool,
+    FileReadTool,
+    FileStatTool,
+    FileWriteTool,
+)
+
 
 
 def build_builtin_tools(
@@ -112,7 +119,8 @@ def build_builtin_tools(
         ])
         
     if uia is not None and input_ctl is not None:
-        tools.append(TypeIntoElementTool(uia, input_ctl))
+        resolver = TargetResolver(uia=uia, input_ctl=input_ctl)
+        tools.append(ClickVisualTool(resolver, input_ctl))
         
     if files is not None:
         tools.extend([
@@ -120,7 +128,12 @@ def build_builtin_tools(
             FileWriteTool(files),
             FileDeleteTool(files),
             FileListTool(files),
+            FileMoveTool(files),
+            FileCopyTool(files),
+            FileMakeDirTool(files),
+            FileStatTool(files),
         ])
+
 
     if include_browsers:
         tools.extend(build_browser_tools(installed_profiles()))

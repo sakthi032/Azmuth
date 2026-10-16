@@ -70,7 +70,6 @@ class ElementInfo:
     is_offscreen: bool
     is_enabled: bool
     score: float = 0.0
-    # -- additions -----------------------------------------------------
     bounding_rect: tuple[int, int, int, int] = (0, 0, 0, 0)
     window_title: str = ""
     window_handle: int = 0
@@ -79,7 +78,6 @@ class ElementInfo:
 
     @property
     def is_interactive(self) -> bool:
-        """True for control types the model can act on."""
         t = self.control_type.lower()
         return any(k in t for k in (
             "button", "edit", "combobox", "listitem", "menuitem",
@@ -310,13 +308,11 @@ class UIAutomationController:
         try:
             for child in root.GetChildren():
                 try:
-                    name = (child.Name or "").strip()
+                    n = (child.Name or "").strip()
                 except Exception:
                     continue
-                if not name:
-                    continue
-                if name not in out:
-                    out.append(name)
+                if n and n not in out:
+                    out.append(n)
                 if len(out) >= limit:
                     break
         except Exception:
@@ -387,58 +383,60 @@ class UIAutomationController:
         limit: int = 20,
         window: str | int | None = None,
     ) -> list[ElementInfo]:
-        """Find UI elements.
-
-        ``window`` scopes the search: pass a title substring or an HWND
-        to search only that window's subtree. If ``None``, searches the
-        whole desktop — which is what allows a similarly-named element
-        in another app to match. Always pass ``window`` when you know it.
-        """
         import asyncio
 
-        @_requires_com
         def _find() -> list[ElementInfo]:
+            _ensure_com_initialized()
             uia = _load_uia()
 
             if window is not None:
-                root = self._resolve_window_root(uia, window)
+                root, title, handle = self._resolve_window(uia, window)
                 if root is None:
                     raise AutomationError(
                         f"no window matched {window!r}; "
-                        f"cannot scope element search"
+                        f"visible top-level windows: "
+                        f"{self._visible_window_titles(uia)[:8]}"
                     )
             else:
                 root = uia.GetRootControl()
+                try:
+                    title = (root.Name or "").strip()
+                    handle = int(getattr(root, "NativeWindowHandle", 0) or 0)
+                except Exception:
+                    title, handle = "", 0
 
             found: list[ElementInfo] = []
-            # Walk the root's CHILDREN, not the root itself — if the root
-            # is a window, we don't want to match its own title.
+            # Start with the root's children so we don't match the root itself.
             try:
-                children = root.GetChildren()
+                top_children = root.GetChildren()
             except Exception:
-                children = [root]
-            for child in children:
+                top_children = [root]
+
+            for child in top_children:
+                if len(found) >= limit * 4:
+                    break
                 self._walk(
                     child, found,
                     name=name, control_type=control_type,
                     automation_id=automation_id,
                     limit=limit * 4, depth=0,
+                    window_title=title, window_handle=handle,
                 )
+
             found.sort(key=lambda e: (-e.score, e.name))
             return found[:limit]
 
         return await asyncio.to_thread(_find)
 
     @staticmethod
-    def _resolve_window_root(uia, window: str | int):
-        """Return the UIA control for a window matched by title or HWND."""
+    def _resolve_window(uia, window: str | int):
+        """Resolve a title substring or HWND to a (root, title, handle) tuple."""
         root = uia.GetRootControl()
         try:
             children = root.GetChildren()
         except Exception:
-            return None
+            return None, "", 0
 
-        # HWND match
         if isinstance(window, int):
             for child in children:
                 try:
@@ -446,19 +444,21 @@ class UIAutomationController:
                 except Exception:
                     continue
                 if h == window:
-                    return child
-            return None
+                    return child, (child.Name or "").strip(), h
+            return None, "", 0
 
-        # Title substring match
-        needle = window.strip().lower()
+        needle = str(window).strip().lower()
+        if not needle:
+            return None, "", 0
         for child in children:
             try:
-                t = (child.Name or "").strip().lower()
+                t = (child.Name or "").strip()
             except Exception:
                 continue
-            if needle and needle in t:
-                return child
-        return None
+            if needle in t.lower():
+                handle = int(getattr(child, "NativeWindowHandle", 0) or 0)
+                return child, t, handle
+        return None, "", 0
 
     def _walk(
         self,
@@ -470,12 +470,14 @@ class UIAutomationController:
         automation_id: str | None,
         limit: int,
         depth: int,
+        window_title: str = "",
+        window_handle: int = 0,
     ) -> None:
         if len(out) >= limit or depth > self._max_depth:
             return
         try:
             children = control.GetChildren()
-        except Exception:  # noqa: BLE001
+        except Exception:
             return
 
         for child in children:
@@ -486,7 +488,7 @@ class UIAutomationController:
                 ctype = child.ControlTypeName or ""
                 cid = child.AutomationId or ""
                 cclass = child.ClassName or ""
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
 
             score = 1.0
@@ -500,6 +502,18 @@ class UIAutomationController:
                 score = 0.0
 
             if score > 0.0:
+                # --- NEW: capture the bounding rectangle ---
+                rect = (0, 0, 0, 0)
+                try:
+                    r = child.BoundingRectangle
+                    if r and r.right > r.left and r.bottom > r.top:
+                        rect = (
+                            int(r.left), int(r.top),
+                            int(r.right), int(r.bottom),
+                        )
+                except Exception:
+                    pass
+
                 out.append(
                     ElementInfo(
                         name=cname,
@@ -509,13 +523,19 @@ class UIAutomationController:
                         is_offscreen=bool(getattr(child, "IsOffscreen", False)),
                         is_enabled=bool(getattr(child, "IsEnabled", True)),
                         score=score,
+                        bounding_rect=rect,
+                        window_title=window_title,
+                        window_handle=window_handle,
+                        depth=depth,
                     )
                 )
 
             self._walk(
                 child, out,
                 name=name, control_type=control_type,
-                automation_id=automation_id, limit=limit, depth=depth + 1,
+                automation_id=automation_id,
+                limit=limit, depth=depth + 1,
+                window_title=window_title, window_handle=window_handle,
             )
 
     # -- interaction -------------------------------------------------------

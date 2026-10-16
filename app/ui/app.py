@@ -1,5 +1,4 @@
-
-"""The tkinter desktop window."""
+"""The tkinter desktop window — redesigned with sidebar and dark theme."""
 
 from __future__ import annotations
 
@@ -31,7 +30,7 @@ def _import_tkinter():
 
 
 class AzmuthDesktopApp:
-    """The tkinter shell."""
+    """The tkinter shell with sidebar + main area layout."""
 
     def __init__(
         self,
@@ -53,86 +52,101 @@ class AzmuthDesktopApp:
 
         self._root = tk.Tk()
         self._root.title(title)
-        self._root.geometry("1150x780")
-        self._root.minsize(700, 500)
+
+        # Size the window to the current screen instead of hardcoding.
+        # On a 1536x864 logical screen (common on 1920x1080 @ 125% DPI),
+        # a fixed 1200x800 window is taller than the usable area.
+        screen_w = self._root.winfo_screenwidth()
+        screen_h = self._root.winfo_screenheight()
+
+        # Cap at 1200x800, but never exceed 90% of the screen in either
+        # dimension — leaves room for the taskbar and the window chrome.
+        win_w = min(1200, int(screen_w * 0.90))
+        win_h = min(800,  int(screen_h * 0.90))
+        win_x = (screen_w - win_w) // 2
+        win_y = max(0, (screen_h - win_h) // 2 - 20)  # nudge up a touch
+
+        self._root.geometry(f"{win_w}x{win_h}+{win_x}+{win_y}")
+        self._root.minsize(700, 480)
 
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
-            target=self._run_loop, name="azmuth-ui-loop", daemon=True
-        )
+            target=self._run_loop, name="azmuth-ui-loop", daemon=True)
         self._loop_thread.start()
 
         self._build_widgets(tk, ttk)
-
-        # Install a confirmer on the controller so dangerous tools show
-        # a dialog before running. Wired here because the dialog needs
-        # the tk root.
         self._controller.set_confirmer(self._confirm_from_dialog)
-
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # -- public API --------------------------------------------------------
     def run(self) -> None:
         self._root.mainloop()
 
     def stop(self) -> None:
         try:
             self._root.after(0, self._root.quit)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
-    # -- widget construction ----------------------------------------------
     def _build_widgets(self, tk, ttk) -> None:
-        from app.ui.components import InputRow, StatusBar, TranscriptView
+        from app.ui.components import InputRow, Sidebar, StatusBar, TranscriptView
+        from app.ui.theme import apply_theme, BASE
 
-        style = ttk.Style(self._root)
-        if "vista" in style.theme_names():
-            style.theme_use("vista")
+        apply_theme(self._root)
 
-        container = ttk.Frame(self._root)
-        container.pack(fill="both", expand=True)
+        outer = tk.Frame(self._root, bg=BASE)
+        outer.pack(fill="both", expand=True)
 
-        self._transcript = TranscriptView(container, self._state)
-        self._transcript.pack(fill="both", expand=True, padx=6, pady=(6, 0))
+        # ── Sidebar ──
+        self._sidebar = Sidebar(
+            outer, self._state,
+            on_login=self._handle_login,
+            on_local_toggle=self._handle_local_toggle,
+            on_new_chat=self._handle_clear,
+        )
+        self._sidebar.pack(side="left", fill="y")
 
-        sep = ttk.Separator(container, orient="horizontal")
-        sep.pack(fill="x", padx=6)
+        # ── Main area ──
+        main = tk.Frame(outer, bg=BASE)
+        main.pack(side="left", fill="both", expand=True)
+        main.rowconfigure(0, weight=1)
+        main.rowconfigure(1, weight=0)
+        main.rowconfigure(2, weight=0)
+        main.columnconfigure(0, weight=1)
 
-        self._status_bar = StatusBar(container, self._state)
-        self._status_bar.pack(fill="x", padx=6, pady=(2, 0))
+        self._transcript = TranscriptView(main, self._state)
+        self._transcript.grid(row=0, column=0, sticky="nsew",
+                              padx=4, pady=(4, 0))
+
+        self._status_bar = StatusBar(main, self._state)
+        self._status_bar.grid(row=1, column=0, sticky="ew")
 
         self._input_row = InputRow(
-            container,
+            main,
             on_send=self._handle_send,
             on_listen=self._handle_listen,
-            on_login=self._handle_login,
             on_clear=self._handle_clear,
             on_cancel_tasks=self._handle_cancel_tasks,
-            on_local_toggle=self._handle_local_toggle,
         )
-        self._input_row.pack(fill="x", padx=6, pady=(0, 6))
+        self._input_row.grid(row=2, column=0, sticky="ew")
 
         self._input_row.focus_entry()
 
         self._state.add_system_message(
             "Azmuth is running. Type a message, or click Login as Creator "
-            "to unlock advanced automation."
-        )
+            "to unlock advanced automation.")
 
-    # -- handlers ----------------------------------------------------------
+    # ── Handlers ───────────────────────────────────────────────────────
     def _handle_send(self, text: str) -> None:
         self._submit(self._controller.send_text(text))
 
     def _handle_listen(self) -> None:
         self._state.add_system_message(
-            "Voice input is not available in this build."
-        )
+            "Voice input is not available in this build.")
 
     def _handle_local_toggle(self, enabled: bool) -> None:
         if self._brain is None:
             self._state.add_system_message(
-                "Local routing is not available in this build."
-            )
+                "Local routing is not available in this build.")
             return
         self._brain.set_prefer_local(enabled)
         mode = "LOCAL (Ollama)" if enabled else "CLOUD"
@@ -144,48 +158,43 @@ class AzmuthDesktopApp:
     def _handle_cancel_tasks(self) -> None:
         removed = self._controller.clear_finished_tasks()
         if removed:
-            self._state.add_system_message(f"Cleared {removed} finished task(s).")
+            self._state.add_system_message(
+                f"Cleared {removed} finished task(s).")
 
     def _handle_login(self) -> None:
         if self._authenticator is None:
             self._state.add_system_message(
                 "Authentication is not configured in this build.",
-                level="warning",  # type: ignore[arg-type]
-            )
+                level="warning")
             return
 
         current = self._authenticator.current_principal
         if current.is_creator:
             self._authenticator.logout()
             self._state.set_mode("restricted", user_id=None)
-            self._input_row.set_logged_in(False)
+            self._sidebar.set_logged_in(False)
             self._state.add_system_message("Logged out. Mode: RESTRICTED.")
             return
 
         pin = self._simpledialog.askstring(
-            "Creator Login",
-            "Enter the creator PIN:",
-            show="*",
-            parent=self._root,
-        )
+            "Creator Login", "Enter the creator PIN:",
+            show="*", parent=self._root)
         if not pin:
             return
 
         try:
             principal = self._authenticator.authenticate("pin", pin=pin)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._messagebox.showerror(
-                "Login failed", str(exc), parent=self._root
-            )
+                "Login failed", str(exc), parent=self._root)
             return
 
         self._state.set_mode(principal.mode.value, user_id=principal.user_id)
-        self._input_row.set_logged_in(True)
+        self._sidebar.set_logged_in(True)
         self._state.add_system_message(
-            f"Logged in as creator. Mode: {principal.mode.value.upper()}."
-        )
+            f"Logged in as creator. Mode: {principal.mode.value.upper()}.")
 
-    # -- confirmation dialog ----------------------------------------------
+    # ── Confirmation dialog ────────────────────────────────────────────
     async def _confirm_from_dialog(
         self, request: ConfirmationRequest
     ) -> bool:
@@ -201,32 +210,29 @@ class AzmuthDesktopApp:
                     f"Arguments: {request.arguments}\n"
                     f"Capability: {request.capability}\n"
                     f"Risk level: {request.risk_level}\n\n"
-                    f"Allow this action?"
-                )
+                    f"Allow this action?")
                 answer = self._messagebox.askyesno(
-                    "Azmuth needs confirmation",
-                    message,
-                    parent=self._root,
-                )
+                    "Azmuth needs confirmation", message,
+                    parent=self._root)
                 loop.call_soon_threadsafe(future.set_result, bool(answer))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("confirmation dialog failed")
                 loop.call_soon_threadsafe(future.set_result, False)
 
         try:
             self._root.after(0, show_dialog)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return False
         return await future
 
-    # -- thread bridging ---------------------------------------------------
+    # ── Thread bridging ────────────────────────────────────────────────
     def _submit(self, coro) -> None:
         asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def _post_to_ui(self, callback, *args: Any) -> None:
         try:
             self._root.after(0, callback, *args)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     def _run_loop(self) -> None:
@@ -236,15 +242,15 @@ class AzmuthDesktopApp:
         finally:
             self._loop.close()
 
-    # -- shutdown ----------------------------------------------------------
+    # ── Shutdown ───────────────────────────────────────────────────────
     def _on_close(self) -> None:
         try:
             self._controller.detach()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         try:
             self._loop.call_soon_threadsafe(self._loop.stop)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         self._root.destroy()
 
@@ -260,11 +266,8 @@ def build_app(
     if controller is None:
         controller = UIController(language=language)
     return AzmuthDesktopApp(
-        controller,
-        title=title,
-        authenticator=authenticator,
-        brain=brain,
-    )
+        controller, title=title,
+        authenticator=authenticator, brain=brain)
 
 
 def run_ui(

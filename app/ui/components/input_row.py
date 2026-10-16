@@ -1,5 +1,8 @@
+"""The input row: text field, Send, Listen, Clear, Cancel Tasks.
 
-"""The input row: text field, Send, Listen, Login, Local, Clear."""
+Login and Local toggle live in the Sidebar. This row is focused
+purely on message input and quick actions.
+"""
 
 from __future__ import annotations
 
@@ -7,59 +10,96 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable
 
+_BASE    = "#1e1e2e"
+_SURF0   = "#313244"
+_SURF1   = "#45475a"
+_OVL1    = "#7f849c"
+_TEXT    = "#cdd6f4"
+_BLUE    = "#89b4fa"
+_ORANGE  = "#fab387"
 
-class InputRow(ttk.Frame):
+
+class InputRow(tk.Frame):
+
     def __init__(
         self,
         parent: tk.Widget,
         *,
         on_send: Callable[[str], None],
         on_listen: Callable[[], None],
-        on_login: Callable[[], None],
         on_clear: Callable[[], None],
         on_cancel_tasks: Callable[[], None],
-        on_local_toggle: Callable[[bool], None] | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, bg=_BASE)
         self._on_send = on_send
 
-        self._entry = ttk.Entry(self, font=("Segoe UI", 12))
-        self._entry.grid(row=0, column=0, sticky="ew", padx=(10, 6), pady=8)
+        # ── Entry ──
+        self._entry = tk.Entry(
+            self, font=("Segoe UI", 12),
+            bg=_SURF0, fg=_TEXT,
+            insertbackground=_TEXT,
+            selectbackground=_SURF1,
+            selectforeground=_TEXT,
+            relief="flat", bd=0,
+            highlightthickness=1,
+            highlightcolor=_BLUE,
+            highlightbackground=_SURF0,
+        )
+        self._entry.pack(side="left", fill="x", expand=True,
+                         padx=(12, 8), pady=6, ipady=6)
         self._entry.bind("<Return>", self._handle_return)
 
-        send_btn = ttk.Button(self, text="Send", command=self._handle_send)
-        send_btn.grid(row=0, column=1, padx=4, pady=8)
-
-        listen_btn = ttk.Button(self, text="Listen", command=on_listen)
-        listen_btn.grid(row=0, column=2, padx=4, pady=8)
-
-        self._login_btn = ttk.Button(
-            self, text="Login as Creator", command=on_login
+        # ── Send ──
+        self._send_btn = tk.Button(
+            self, text="Send", command=self._handle_send,
+            bg=_BLUE, fg=_BASE, activebackground=_SURF1,
+            activeforeground=_TEXT, font=("Segoe UI", 11, "bold"),
+            relief="flat", bd=0, cursor="hand2",
+            padx=20, pady=6,
         )
-        self._login_btn.grid(row=0, column=3, padx=4, pady=8)
+        self._send_btn.pack(side="left", padx=(0, 6), pady=10)
+        self._send_btn.bind(
+            "<Enter>", lambda _e: self._send_btn.configure(bg="#9ec5fe"))
+        self._send_btn.bind(
+            "<Leave>", lambda _e: self._send_btn.configure(bg=_BLUE))
 
-        self._local_var = tk.BooleanVar(value=False)
-        local_check = ttk.Checkbutton(
-            self,
-            text="Local",
-            variable=self._local_var,
-            command=(
-                lambda: on_local_toggle(self._local_var.get())
-                if on_local_toggle is not None
-                else None
-            ),
+        # ── Divider ──
+        tk.Frame(self, bg=_SURF0, width=1).pack(
+            side="left", fill="y", padx=4, pady=14)
+
+        # ── Secondary buttons ──
+        self._listen_btn = self._ghost_btn(
+            "\u266a Listen", on_listen, side="left", padx=2)
+        self._clear_btn = self._ghost_btn(
+            "Clear", on_clear, side="left", padx=2)
+
+        self._cancel_btn = tk.Button(
+            self, text="Cancel Tasks", command=on_cancel_tasks,
+            bg=_BASE, fg=_OVL1, activebackground=_SURF0,
+            activeforeground=_ORANGE, font=("Segoe UI", 9),
+            relief="flat", bd=0, cursor="hand2",
+            padx=10, pady=4,
         )
-        local_check.grid(row=0, column=4, padx=4, pady=8)
+        self._cancel_btn.pack(side="left", padx=(2, 10), pady=10)
+        self._cancel_btn.bind(
+            "<Enter>", lambda _e: self._cancel_btn.configure(
+                bg=_SURF0, fg=_ORANGE))
+        self._cancel_btn.bind(
+            "<Leave>", lambda _e: self._cancel_btn.configure(
+                bg=_BASE, fg=_OVL1))
 
-        cancel_btn = ttk.Button(
-            self, text="Cancel Tasks", command=on_cancel_tasks
+    def _ghost_btn(self, text, cmd, *, side="left", padx=2):
+        btn = tk.Button(
+            self, text=text, command=cmd,
+            bg=_BASE, fg=_OVL1, activebackground=_SURF0,
+            activeforeground=_TEXT, font=("Segoe UI", 9),
+            relief="flat", bd=0, cursor="hand2",
+            padx=10, pady=4,
         )
-        cancel_btn.grid(row=0, column=5, padx=4, pady=8)
-
-        clear_btn = ttk.Button(self, text="Clear", command=on_clear)
-        clear_btn.grid(row=0, column=6, padx=(4, 10), pady=8)
-
-        self.columnconfigure(0, weight=1)
+        btn.pack(side=side, padx=padx, pady=10)
+        btn.bind("<Enter>", lambda _e: btn.configure(bg=_SURF0, fg=_TEXT))
+        btn.bind("<Leave>", lambda _e: btn.configure(bg=_BASE, fg=_OVL1))
+        return btn
 
     def focus_entry(self) -> None:
         self._entry.focus_set()
@@ -67,11 +107,7 @@ class InputRow(ttk.Frame):
     def set_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         self._entry.configure(state=state)
-
-    def set_logged_in(self, logged_in: bool) -> None:
-        self._login_btn.configure(
-            text="Logout (Creator)" if logged_in else "Login as Creator"
-        )
+        self._send_btn.configure(state=state)
 
     def _handle_return(self, _event) -> None:
         self._handle_send()

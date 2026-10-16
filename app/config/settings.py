@@ -266,7 +266,6 @@ def _get_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
         f"{key} must be a boolean (one of {sorted(_TRUE | _FALSE)}), got {raw!r}"
     )
 
-
 def _get_int(
     env: Mapping[str, str],
     key: str,
@@ -320,6 +319,14 @@ def _get_csv(env: Mapping[str, str], key: str) -> tuple[str, ...]:
         part.strip().lower() for part in raw.split(",") if part.strip()
     )
 
+def _get_path_csv(env: Mapping[str, str], key: str) -> tuple[str, ...]:
+    """Comma-separated file paths. Does NOT lowercase — paths are
+    case-sensitive on some filesystems and mixed-case Windows paths
+    are the norm."""
+    raw = _get_str(env, key)
+    if raw is None:
+        return ()
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 # --------------------------------------------------------------------------
 # Loader
@@ -478,9 +485,8 @@ def load_settings(
         postgres_user=_get_str(env, "POSTGRES_USER", "postgres") or "postgres",
         postgres_password=_get_str(env, "POSTGRES_PASSWORD", "") or "",
         postgres_schema=_get_str(env, "POSTGRES_SCHEMA", "public") or "public",
-        file_sandbox_roots=tuple(
-            _get_csv(env, "FILE_SANDBOX_ROOTS")
-        ) or (str(_PROJECT_ROOT), str(Path.home())),
+        file_sandbox_roots=_get_path_csv(env, "FILE_SANDBOX_ROOTS")
+        or (str(_PROJECT_ROOT), str(Path.home())),
 
         location_city=_get_str(env, "AZMUTH_LOCATION_CITY"),
         location_region=_get_str(env, "AZMUTH_LOCATION_REGION"),
