@@ -33,6 +33,7 @@ class Sidebar(tk.Frame):
         on_login: Callable[[], None],
         on_local_toggle: Callable[[bool], None] | None = None,
         on_new_chat: Callable[[], None] | None = None,
+        on_always_speak_toggle: Callable[[bool], None] | None = None,
     ) -> None:
         super().__init__(parent, bg=_MANTLE, width=self.WIDTH)
         self._state = state
@@ -40,7 +41,7 @@ class Sidebar(tk.Frame):
         self._on_local_toggle = on_local_toggle
         self._on_new_chat = on_new_chat
         self._logged_in = False
-
+        self._on_always_speak_toggle = on_always_speak_toggle
         self.pack_propagate(False)
         self.grid_propagate(False)
 
@@ -141,6 +142,20 @@ class Sidebar(tk.Frame):
     def _build_settings(self) -> None:
         sett = tk.Frame(self, bg=_MANTLE)
         sett.pack(fill="x", padx=18, pady=(0, 18), side="bottom")
+
+        if self._on_always_speak_toggle is not None:
+            vf = tk.Frame(sett, bg=_MANTLE)
+            vf.pack(fill="x", pady=(0, 10))
+            tk.Label(vf, text="Always Speak", bg=_MANTLE,
+                     fg=_SUB0, font=("Segoe UI", 9)).pack(side="left")
+            self._speak_var = tk.BooleanVar(value=False)
+            tk.Checkbutton(
+                vf, variable=self._speak_var,
+                bg=_MANTLE, fg=_TEXT, selectcolor=_SURF0,
+                activebackground=_MANTLE, activeforeground=_TEXT,
+                highlightthickness=0, bd=0,
+                command=lambda: self._on_always_speak_toggle(self._speak_var.get()),
+            ).pack(side="right")
 
         if self._on_local_toggle is not None:
             lf = tk.Frame(sett, bg=_MANTLE)

@@ -16,6 +16,10 @@ from app.tools.builtin.browser_tools import build_browser_tools
 from app.tools.builtin.chrome_extension_tools import build_extension_tools
 from app.tools.builtin.echo import EchoTool
 from app.tools.builtin.get_time import GetTimeTool
+from app.automation.verifier import Verifier
+from app.tools.builtin.wait_tools import WaitForAbsenceTool, WaitForElementTool
+from app.tools.builtin.gold_rate import GetGoldRateTool
+from app.tools.builtin.weather import GetWeatherTool
 from app.tools.builtin.screen_state import (
     GetScreenStateTool,
     GetWindowStateTool,
@@ -79,7 +83,11 @@ def build_builtin_tools(
 
     if search is not None:
         tools.append(SearchWebTool(search))
-
+    # Domain-specific data tools — always available, no subsystem deps.
+        tools.extend([
+            GetGoldRateTool(),
+            GetWeatherTool(default_city="Chennai"),
+        ])
     if automation is not None:
         tools.extend([
             OpenApplicationTool(automation),
@@ -101,6 +109,9 @@ def build_builtin_tools(
             GetScreenStateTool(uia),
             GetWindowStateTool(uia),
             VerifyElementTool(uia),
+            # -- Wait / poll ------------------------------------------------
+            WaitForElementTool(uia),
+            WaitForAbsenceTool(uia),
             # -- Discovery / search -----------------------------------------
             ListUIElementsTool(uia),
             # -- Action -----------------------------------------------------
@@ -120,7 +131,8 @@ def build_builtin_tools(
         
     if uia is not None and input_ctl is not None:
         resolver = TargetResolver(uia=uia, input_ctl=input_ctl)
-        tools.append(ClickVisualTool(resolver, input_ctl))
+        verifier = Verifier(uia)
+        tools.append(ClickVisualTool(resolver, input_ctl, verifier))
         
     if files is not None:
         tools.extend([

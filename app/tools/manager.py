@@ -65,6 +65,10 @@ class ToolManager:
 
     # -- registration ------------------------------------------------------
     @property
+    def permissions(self) -> PermissionManager:
+        return self._permissions
+
+    @property
     def registry(self) -> ToolRegistry:
         return self._registry
 
@@ -111,10 +115,18 @@ class ToolManager:
                     extra={"event": "TOOL_AVAILABILITY_FAILED", "tool": tool.name},
                 )
                 continue
-            if principal is not None and not self._permissions.check(
-                principal, tool.capability
-            ):
-                continue
+            if principal is not None:
+                can_use = self._permissions.check(principal, tool.capability)
+                if not can_use and self._permissions.workspace_policy.approved_roots:
+                    # Non-destructive project workspace tools can be used in approved workspaces
+                    if tool.capability in (
+                        Capability.READ_PERSONAL_FILE,
+                        Capability.LIST_FILES,
+                        Capability.WRITE_FILE,
+                    ):
+                        can_use = True
+                if not can_use:
+                    continue
             result.append(tool.metadata())
         return tuple(result)
 
@@ -144,8 +156,15 @@ class ToolManager:
         # ---- selection ---------------------------------------------------
         tool = self._registry.get(name)
 
+        # Extract target path(s) if this tool operates on paths
+        target_path = arguments.get("path") or arguments.get("source")
+
         # ---- permission --------------------------------------------------
-        self._permissions.require(principal, tool.capability)
+        self._permissions.require(principal, tool.capability, path=target_path)
+        if arguments.get("destination"):
+            self._permissions.require(
+                principal, tool.capability, path=arguments["destination"]
+            )
 
         # ---- availability ------------------------------------------------
         try:

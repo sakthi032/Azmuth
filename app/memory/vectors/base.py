@@ -62,3 +62,11 @@ class VectorStore(Provider):
     @abstractmethod
     def clear(self) -> None:
         """Remove every vector."""
+
+    def close(self) -> None:
+        """Persist and release any resources. Default is a no-op.
+
+        Subclasses with on-disk state (e.g., ChromaDB) should override this
+        to flush/persist data without deleting it. Called by MemoryManager
+        during shutdown.
+        """

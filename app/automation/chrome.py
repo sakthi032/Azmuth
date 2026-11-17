@@ -13,6 +13,7 @@ The debug port is only open when the browser was launched with
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -52,6 +53,8 @@ class BrowserDevTools:
         self._base_url = f"http://localhost:{port}"
         self._timeout = timeout
         self._browser_name = browser_name
+        self._last_check: float = 0.0
+        self._cached_available: bool = False
 
     # -- introspection -----------------------------------------------------
     @property
@@ -63,12 +66,18 @@ class BrowserDevTools:
         return self._base_url
 
     def is_available(self) -> bool:
+        now = time.monotonic()
+        if now - self._last_check < 2.0:
+            return self._cached_available
+        self._last_check = now
         try:
             with urllib.request.urlopen(
-                f"{self._base_url}/json/version", timeout=self._timeout
+                f"{self._base_url}/json/version", timeout=min(self._timeout, 0.3)
             ) as response:
-                return response.status == 200
+                self._cached_available = (response.status == 200)
+                return self._cached_available
         except Exception:
+            self._cached_available = False
             return False
 
     def focus_tab(self, tab_id: str) -> None:

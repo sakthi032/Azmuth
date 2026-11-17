@@ -126,10 +126,15 @@ def _run_ui(settings: Settings) -> int:
             controller,
             authenticator=azmuth._authenticator,
             brain=azmuth.brain,
+            voice=azmuth.voice,
+            tts=azmuth.tts,
+            event_bus=azmuth.event_bus,
         )
         app.run()
     except RuntimeError as exc:
+        import traceback
         print(f"Could not open the desktop UI: {exc}", file=sys.stderr)
+        traceback.print_exc()
         return 3
     finally:
         try:

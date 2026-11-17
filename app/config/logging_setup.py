@@ -20,7 +20,8 @@ last line of defence, not a licence to log secrets.
 """
 
 from __future__ import annotations
-
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
 import json
 import logging
 import logging.handlers

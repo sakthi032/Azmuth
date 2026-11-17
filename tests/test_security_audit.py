@@ -255,5 +255,8 @@ def _all_tool_subclasses() -> set[type[Tool]]:
                 continue
             found.add(child)
             stack.append(child)
-    # Exclude abstract intermediates.
-    return {cls for cls in found if not inspect.isabstract(cls)}
+    # Exclude abstract intermediates and private base classes.
+    return {
+        cls for cls in found
+        if not inspect.isabstract(cls) and not cls.__name__.startswith("_")
+    }

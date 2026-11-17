@@ -6,6 +6,7 @@
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q -ra --strict-markers --strict-config"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: end-to-end tests that wire multiple subsystems",
     "concurrency: async interaction between tasks, voice, and text",

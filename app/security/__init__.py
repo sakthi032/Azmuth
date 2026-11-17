@@ -20,6 +20,7 @@ from app.security.methods import (
 )
 from app.security.modes import AssuranceLevel, PermissionMode, Principal
 from app.security.permissions import PermissionManager
+from app.security.workspace import ProjectWorkspacePolicy
 
 __all__ = [
     "AssuranceLevel",
@@ -36,6 +37,7 @@ __all__ = [
     "PermissionManager",
     "PermissionMode",
     "Principal",
+    "ProjectWorkspacePolicy",
     "VoiceMethod",
     "build_default_methods",
 ]

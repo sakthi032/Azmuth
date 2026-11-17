@@ -210,6 +210,38 @@ class MemoryManager:
             self._touch(record.id)
         return records
 
+    def recall_hybrid(
+        self,
+        query: str,
+        *,
+        user_id: str | None = None,
+        top_k: int = 5,
+    ) -> list[MemoryRecord]:
+        """Hybrid retrieval combining BM25 keyword matching and vector search with RRF."""
+        try:
+            from app.memory.retrieval.bm25_retriever import BM25Retriever
+            user_records = self._backend.list(user_id=user_id or "creator", limit=100)
+            bm25 = BM25Retriever(user_records)
+            bm25_hits = bm25.retrieve(query, top_k=top_k * 2)
+        except Exception:
+            bm25_hits = []
+
+        vector_hits = self.recall(query, user_id=user_id, top_k=top_k * 2)
+
+        scores: dict[str, float] = {}
+        records_by_id: dict[str, MemoryRecord] = {}
+
+        for rank, rec in enumerate(bm25_hits):
+            scores[rec.id] = scores.get(rec.id, 0.0) + 1.0 / (60 + rank + 1)
+            records_by_id[rec.id] = rec
+
+        for rank, rec in enumerate(vector_hits):
+            scores[rec.id] = scores.get(rec.id, 0.0) + 1.0 / (60 + rank + 1)
+            records_by_id[rec.id] = rec
+
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return [records_by_id[rid] for rid, _ in ranked[:top_k]]
+
     def list_for_user(
         self,
         user_id: str,
@@ -237,7 +269,9 @@ class MemoryManager:
         finally:
             if self._vectors.is_available():
                 try:
-                    self._vectors.clear()
+                    # close() persists data without deleting it.
+                    # clear() would destroy all vectors — do NOT call that here.
+                    self._vectors.close()
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -288,10 +322,67 @@ class MemoryManager:
             pass
         self._index(record)
 
+def _build_embeddings(settings: Settings) -> EmbeddingProvider | None:
+    """Construct an embedding provider from settings, or None on failure."""
+    name = (settings.embedding_provider or "null").lower()
+    if name in ("null", "none", ""):
+        return None
+    if name == "ollama":
+        try:
+            from app.memory.vectors.ollama_embed import OllamaEmbeddingProvider
+            provider = OllamaEmbeddingProvider(
+                model=settings.embedding_model,
+                base_url=settings.ollama_base_url.replace("/v1", ""),
+                dimension=settings.embedding_dimension,
+            )
+            if not provider.is_available():
+                logger.warning(
+                    "ollama embedding model not available",
+                    extra={
+                        "event": "EMBEDDING_UNAVAILABLE",
+                        "model": settings.embedding_model,
+                    },
+                )
+                return None
+            return provider
+        except Exception:
+            logger.exception(
+                "failed to build ollama embedding provider",
+                extra={"event": "EMBEDDING_BUILD_FAILED"},
+            )
+            return None
+    logger.warning(
+        "unknown embedding provider %r — using null", name,
+        extra={"event": "EMBEDDING_UNKNOWN"},
+    )
+    return None
 
-# --------------------------------------------------------------------------
-# Factory
-# --------------------------------------------------------------------------
+
+def _build_vectors(settings: Settings) -> VectorStore | None:
+    """Construct a vector store from settings, or None on failure."""
+    name = (settings.vector_store or "null").lower()
+    if name in ("null", "none", ""):
+        return None
+    if name == "chroma":
+        try:
+            from app.memory.vectors.chroma_store import ChromaVectorStore
+            store = ChromaVectorStore(settings.vector_store_path)
+            if not store.is_available():
+                return None
+            return store
+        except Exception:
+            logger.exception(
+                "failed to build chroma vector store",
+                extra={"event": "VECTOR_STORE_BUILD_FAILED"},
+            )
+            return None
+    logger.warning(
+        "unknown vector store %r — using null", name,
+        extra={"event": "VECTOR_STORE_UNKNOWN"},
+    )
+    return None
+
+
 def build_memory_manager(
     settings: Settings,
     *,
@@ -305,6 +396,10 @@ def build_memory_manager(
     * ``sqlite`` (default) - a local file, no server required.
     * ``postgres`` - a PostgreSQL database. Requires ``POSTGRES_*``
       settings and the ``psycopg[binary,pool]`` package.
+
+    Embeddings and vector store are built from settings when not
+    supplied. Both default to null (disabled) so the app works without
+    a real embedding model installed.
     """
     backend_name = (settings.memory_backend or "sqlite").lower()
 
@@ -343,9 +438,29 @@ def build_memory_manager(
             f"Supported: 'sqlite', 'postgres'."
         )
 
+    # Build embeddings / vectors if caller didn't supply them.
+    emb = embeddings if embeddings is not None else _build_embeddings(settings)
+    vec = vectors if vectors is not None else _build_vectors(settings)
+
+    if emb is not None and vec is not None:
+        logger.info(
+            "semantic recall enabled",
+            extra={
+                "event": "SEMANTIC_RECALL_ENABLED",
+                "embedding_provider": emb.name,
+                "vector_store": vec.name,
+                "dimension": emb.dimension,
+            },
+        )
+    else:
+        logger.info(
+            "semantic recall disabled — using keyword search only",
+            extra={"event": "SEMANTIC_RECALL_DISABLED"},
+        )
+
     return MemoryManager(
         settings,
         backend,
-        embeddings=embeddings,
-        vectors=vectors,
+        embeddings=emb,
+        vectors=vec,
     )

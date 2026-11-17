@@ -11,6 +11,15 @@ from app.brain.pipeline import Brain, BrainResponse, ToolExecutionRecord
 from app.brain.prompts import build_system_prompt
 from app.brain.tool_calls import ToolCall, parse_tool_calls
 from app.brain.purpose import detect_purpose
+from app.brain.planner import (
+    AutonomousPlanner,
+    ExecutionPlan,
+    PlanStep,
+    PlanStatus,
+    StepStatus,
+    is_planning_goal,
+)
+
 __all__ = [
     "Azmuth",
     "Brain",
@@ -21,4 +30,10 @@ __all__ = [
     "build_system_prompt",
     "parse_tool_calls",
     "detect_purpose",
+    "AutonomousPlanner",
+    "ExecutionPlan",
+    "PlanStep",
+    "PlanStatus",
+    "StepStatus",
+    "is_planning_goal",
 ]

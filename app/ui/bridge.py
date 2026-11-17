@@ -27,26 +27,28 @@ Responder = Callable[
 ]
 
 
-def _unpack_result(result: tuple[Any, ...]) -> tuple[str, str, str, str]:
-    """Return (reply, session_id, model, provider) from a responder result.
-
-    Accepts a 2-tuple (legacy) or a 4-tuple (with model info). Anything
-    else is a contract violation and raises ValueError with a clear
-    message — the bridge is not the place to guess.
-    """
+def _unpack_result(
+    result: tuple[Any, ...]
+) -> tuple[str, str, str, str, str]:
+    """Return (reply, session_id, model, provider, spoken_text)."""
     if len(result) == 2:
         reply, session_id = result
-        return reply or "", session_id or "", "", ""
+        return reply or "", session_id or "", "", "", ""
     if len(result) == 4:
         reply, session_id, model, provider = result
         return (
-            reply or "",
-            session_id or "",
-            str(model or ""),
-            str(provider or ""),
+            reply or "", session_id or "",
+            str(model or ""), str(provider or ""), "",
+        )
+    if len(result) == 5:
+        reply, session_id, model, provider, spoken = result
+        return (
+            reply or "", session_id or "",
+            str(model or ""), str(provider or ""),
+            str(spoken or ""),
         )
     raise ValueError(
-        f"responder must return 2 or 4 values, got {len(result)}"
+        f"responder must return 2, 4, or 5 values, got {len(result)}"
     )
 
 
@@ -75,6 +77,7 @@ class UIController:
         responder: Responder | None = None,
         confirmer: Confirmer | None = None,
         state: UIState | None = None,
+        
     ) -> None:
         self._state = state or UIState()
         self._language = language
@@ -84,6 +87,7 @@ class UIController:
         self._reducer = UIReducer(self._state, event_bus)
         self._busy = False
         self._conversation_id: str | None = None
+        self._last_spoken_text: str = "" 
 
     # -- introspection -----------------------------------------------------
     @property
@@ -97,7 +101,12 @@ class UIController:
     @property
     def conversation_id(self) -> str | None:
         return self._conversation_id
-
+    @property
+    def last_spoken_text(self) -> str:
+        """The spoken version of the most recent response, if the model
+        provided one. Empty string when the model did not comply."""
+        return self._last_spoken_text
+    
     def reset_conversation(self) -> None:
         self._conversation_id = None
 
@@ -150,7 +159,8 @@ class UIController:
                 )
                 return ""
 
-            reply, session_id, model, provider = _unpack_result(raw)
+            reply, session_id, model, provider, spoken_text = _unpack_result(raw)
+            self._last_spoken_text = spoken_text
 
             if session_id:
                 self._conversation_id = session_id
@@ -189,7 +199,8 @@ class UIController:
                 self._state.set_error(str(exc))
                 return ""
 
-            reply, session_id, model, provider = _unpack_result(raw)
+            reply, session_id, model, provider, spoken_text = _unpack_result(raw)
+            self._last_spoken_text = spoken_text
 
             if session_id:
                 self._conversation_id = session_id

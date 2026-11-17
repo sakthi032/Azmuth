@@ -296,18 +296,11 @@ def build_tts_manager(
     *,
     registry: Registry[TextToSpeechProvider] | None = None,
 ) -> TTSManager:
-    """Construct a :class:`TTSManager` using the configured provider.
-
-    Uses the built-in registry (which today contains only the null
-    provider). Real providers register on the same registry; the manager
-    does not change.
-    """
     from app.voice.tts.providers import build_tts_registry
 
     return TTSManager(
         settings.tts_provider or "null",
         registry if registry is not None else build_tts_registry(),
     )
-
 
 __all__ = ["SpeechOutcome", "TTSManager", "build_tts_manager"]

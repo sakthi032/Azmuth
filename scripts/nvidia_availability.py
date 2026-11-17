@@ -17,7 +17,7 @@ from app.config.settings import load_settings
 # the results tell you which to keep in the registry.
 CANDIDATES = [
     # Already known to work
-    "nvidia/nemotron-3-super-120b-a12b",
+    "z-ai/glm-5.3",
     "openai/gpt-oss-20b",
     # Chat / reasoning alternatives
     "z-ai/glm-5.3",

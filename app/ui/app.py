@@ -11,6 +11,8 @@ from app.config.logging_setup import get_logger
 from app.language.manager import LanguageManager
 from app.ui.bridge import UIController
 from app.ui.state import UIState
+from app.voice.manager import VoiceInputManager
+from app.voice.tts.manager import TTSManager
 
 logger = get_logger("ui.app")
 
@@ -33,12 +35,15 @@ class AzmuthDesktopApp:
     """The tkinter shell with sidebar + main area layout."""
 
     def __init__(
-        self,
+       self,
         controller: UIController,
         *,
         title: str = "Azmuth",
         authenticator=None,
         brain=None,
+        voice: VoiceInputManager | None = None,
+        tts: TTSManager | None = None,
+        event_bus=None, 
     ) -> None:
         tk, ttk, messagebox, simpledialog = _import_tkinter()
         self._tk = tk
@@ -49,7 +54,12 @@ class AzmuthDesktopApp:
         self._authenticator = authenticator
         self._brain = brain
         self._state: UIState = controller.state
-
+        self._voice = voice
+        self._tts = tts
+        self._event_bus = event_bus 
+        self._always_speak = False
+        self._speech_queue = None  
+        self._narrator = None
         self._root = tk.Tk()
         self._root.title(title)
 
@@ -75,6 +85,7 @@ class AzmuthDesktopApp:
         self._loop_thread.start()
 
         self._build_widgets(tk, ttk)
+
         self._controller.set_confirmer(self._confirm_from_dialog)
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -87,10 +98,64 @@ class AzmuthDesktopApp:
         except Exception:
             pass
 
+    def _setup_speech(self) -> None:
+        """Wire SpeechQueue and Narrator. Runs on the tkinter thread
+        after the asyncio loop thread is confirmed running."""
+        try:
+            from pathlib import Path
+            from app.voice.speech_queue import SpeechQueue
+            from app.voice.narration import Narrator
+
+            self._speech_queue = SpeechQueue(self._tts)
+
+            # Schedule start() on the loop; safe now because run_forever()
+            # has been called for ~50ms.
+            future = asyncio.run_coroutine_threadsafe(
+                self._speech_queue.start(), self._loop
+            )
+            # Schedule start() but do NOT block waiting for it.
+            asyncio.run_coroutine_threadsafe(
+                self._speech_queue.start(), self._loop
+            )
+
+            tool_lookup = None
+            if self._brain is not None:
+                try:
+                    tool_lookup = self._brain.tools.metadata
+                except Exception:
+                    logger.exception("could not access brain.tools.metadata")
+
+            overrides = Path("data/narration_overrides.json")
+            self._narrator = Narrator(
+                self._speech_queue,
+                tool_lookup=tool_lookup,
+                overrides_path=overrides if overrides.is_file() else None,
+            )
+            self._narrator.set_enabled_callback(
+                lambda: self._always_speak
+            )
+            self._narrator.subscribe(self._event_bus)
+            logger.info(
+                "speech narration wired",
+                extra={"event": "SPEECH_NARRATION_READY"},
+            )
+        except Exception:
+            logger.exception(
+                "speech queue setup failed — narration disabled",
+                extra={"event": "SPEECH_SETUP_FAILED"},
+            )
+            self._speech_queue = None
+            self._narrator = None
+
     def _build_widgets(self, tk, ttk) -> None:
         from app.ui.components import InputRow, Sidebar, StatusBar, TranscriptView
         from app.ui.theme import apply_theme, BASE
 
+        # Defer speech queue setup until the event loop is running.
+        # Scheduling run_coroutine_threadsafe synchronously from __init__
+        # races against the loop thread's run_forever() call.
+        if self._tts is not None and self._event_bus is not None:
+            self._root.after(50, self._setup_speech)
         apply_theme(self._root)
 
         outer = tk.Frame(self._root, bg=BASE)
@@ -102,6 +167,7 @@ class AzmuthDesktopApp:
             on_login=self._handle_login,
             on_local_toggle=self._handle_local_toggle,
             on_new_chat=self._handle_clear,
+            on_always_speak_toggle=self._handle_always_speak_toggle,
         )
         self._sidebar.pack(side="left", fill="y")
 
@@ -137,11 +203,67 @@ class AzmuthDesktopApp:
 
     # ── Handlers ───────────────────────────────────────────────────────
     def _handle_send(self, text: str) -> None:
-        self._submit(self._controller.send_text(text))
+        self._submit(self._do_send_and_speak(text))
+
+    async def _do_send_and_speak(self, text: str) -> None:
+        if self._speech_queue is not None:
+            await self._speech_queue.cancel_pending()
+
+        reply = await self._controller.send_text(text)
+
+        if reply and self._always_speak:
+            spoken = self._controller.last_spoken_text or reply
+            if self._speech_queue is not None:
+                await self._speech_queue.enqueue(spoken)
+            elif self._tts is not None:
+                asyncio.create_task(
+                    self._tts.speak_response(spoken),
+                    name="tts_speak",
+                )
+
 
     def _handle_listen(self) -> None:
-        self._state.add_system_message(
-            "Voice input is not available in this build.")
+        if self._voice is None:
+            self._state.add_system_message(
+                "Voice input is not configured.", level="warning")
+            return
+        self._submit(self._do_voice_listen())
+
+    async def _do_voice_listen(self) -> None:
+        if not self._voice.is_available(require_wake_word=False):
+            self._state.add_system_message(
+                "Voice input unavailable — check microphone and STT.",
+                level="warning")
+            return
+
+        if self._speech_queue is not None:
+            await self._speech_queue.cancel_pending()
+
+        self._state.add_system_message("Listening…")
+        user_input = await self._voice.listen_once(require_wake_word=False)
+        if user_input is None:
+            self._state.add_system_message("No speech detected.")
+            return
+
+        reply = await self._controller.add_voice_input(user_input)
+        if reply and self._always_speak:
+            spoken = self._controller.last_spoken_text or reply
+            if self._speech_queue is not None:
+                await self._speech_queue.enqueue(
+                    spoken, language=user_input.language
+                )
+            elif self._tts is not None:
+                asyncio.create_task(
+                    self._tts.speak_response(
+                        spoken, language=user_input.language
+                    ),
+                    name="tts_speak",
+                )
+
+    def _handle_always_speak_toggle(self, enabled: bool) -> None:
+        self._always_speak = enabled
+        state = "ON" if enabled else "OFF"
+        self._state.add_system_message(f"Always-speak: {state}")
 
     def _handle_local_toggle(self, enabled: bool) -> None:
         if self._brain is None:
@@ -244,6 +366,18 @@ class AzmuthDesktopApp:
 
     # ── Shutdown ───────────────────────────────────────────────────────
     def _on_close(self) -> None:
+        if self._narrator is not None:
+            try:
+                self._narrator.unsubscribe()
+            except Exception:
+                pass
+        if self._speech_queue is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._speech_queue.stop(), self._loop
+                )
+            except Exception:
+                pass
         try:
             self._controller.detach()
         except Exception:

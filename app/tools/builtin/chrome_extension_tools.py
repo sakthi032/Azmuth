@@ -21,6 +21,8 @@ from app.tools.base import RiskLevel, Tool
 # Base
 # --------------------------------------------------------------------------
 class _ExtToolBase(Tool):
+    name: ClassVar[str] = "ext_tool"
+    description: ClassVar[str] = "Browser extension tool"
     action: ClassVar[str] = ""
     browser: ClassVar[str] = "chrome"
 

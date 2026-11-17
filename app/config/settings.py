@@ -150,17 +150,36 @@ class Settings:
     tts_provider: str
     wake_word_provider: str
     wake_word_phrase: str
-
+    tts_voice: str | None
+    tts_rate: str
+    tts_volume: str
+    voice_always_speak: bool
+    # ---- STT detail -----------------------------------------------------
+    stt_model: str
+    stt_device: str
+    stt_compute_type: str
+    stt_language: str | None
+    stt_beam_size: int
+    stt_vad_filter: bool
+    stt_initial_prompt: str | None
+    # ---- Audio source ---------------------------------------------------
+    audio_source: str
+    audio_sample_rate: int
+    audio_channels: int
+    audio_block_ms: int
+    audio_device: str | None
+    audio_silence_rms: float
     # ---- Memory ---------------------------------------------------------
     memory_backend: str
     memory_database: str
-    embedding_provider: str
-    postgres_host: str
-    postgres_port: int
-    postgres_database: str
-    postgres_user: str
-    postgres_password: str
-    postgres_schema: str
+    # ---- Embeddings -----------------------------------------------------
+    embedding_provider: str        # already exists
+    embedding_model: str           # NEW
+    embedding_dimension: int       # NEW
+
+    # ---- Vector store ---------------------------------------------------
+    vector_store: str              # NEW
+    vector_store_path: str         # NEW
     # ---- PostgreSQL (used when memory_backend == "postgres") -----------
     postgres_host: str
     postgres_port: int
@@ -220,9 +239,21 @@ class Settings:
             "search_api_key": "***redacted***" if self.search_api_key else None,
             "stt_provider": self.stt_provider,
             "tts_provider": self.tts_provider,
+            "tts_voice": self.tts_voice,
+            "tts_rate": self.tts_rate,
+            "voice_always_speak": self.voice_always_speak,
             "wake_word_provider": self.wake_word_provider,
+            "stt_model": self.stt_model,
+            "stt_device": self.stt_device,
+            "stt_language": self.stt_language,
+            "audio_source": self.audio_source,
+            "audio_sample_rate": self.audio_sample_rate,
             "memory_backend": self.memory_backend,
             "embedding_provider": self.embedding_provider,
+            "embedding_model": self.embedding_model,
+            "embedding_dimension": self.embedding_dimension,
+            "vector_store": self.vector_store,
+            "vector_store_path": self.vector_store_path,
             "creator_auth_method": self.creator_auth_method,
             "paths": self.paths.as_dict(),
             "postgres_host": self.postgres_host,
@@ -250,6 +281,14 @@ def _get_str(
     if raw is None:
         return default
     raw = raw.strip()
+    # Strip inline comments: a `#` preceded by whitespace and not inside
+    # quotes. This matches dotenv's intent while being robust against
+    # comment markers the parser might miss.
+    if " #" in raw:
+        # Only strip if the value isn't quoted — a quoted string may
+        # legitimately contain " #".
+        if not (raw.startswith("'") or raw.startswith('"')):
+            raw = raw.split(" #", 1)[0].rstrip()
     return raw if raw else default
 
 
@@ -453,12 +492,44 @@ def load_settings(
         searxng_api_key=_get_str(env, "SEARXNG_API_KEY"),
         stt_provider=(_get_str(env, "STT_PROVIDER", "null") or "null").lower(),
         tts_provider=(_get_str(env, "TTS_PROVIDER", "null") or "null").lower(),
+        tts_voice=_get_str(env, "TTS_VOICE") or None,
+        tts_rate=_get_str(env, "TTS_RATE", "+0%") or "+0%",
+        tts_volume=_get_str(env, "TTS_VOLUME", "+0%") or "+0%",
+        voice_always_speak=_get_bool(env, "VOICE_ALWAYS_SPEAK", False),
+        stt_initial_prompt=_get_str(env, "STT_INITIAL_PROMPT") or None,
+        audio_silence_rms=_get_float(
+            env, "AUDIO_SILENCE_RMS", 80.0, minimum=0.0
+        ),
         wake_word_provider=(
             _get_str(env, "WAKE_WORD_PROVIDER", "null") or "null"
         ).lower(),
         wake_word_phrase=(
             _get_str(env, "WAKE_WORD_PHRASE", "azmuth") or "azmuth"
         ),
+        stt_model=_get_str(env, "STT_MODEL", "base") or "base",
+        stt_device=_get_str(env, "STT_DEVICE", "cpu") or "cpu",
+        stt_compute_type=(
+            _get_str(env, "STT_COMPUTE_TYPE", "int8") or "int8"
+        ),
+        stt_language=_get_str(env, "STT_LANGUAGE") or None,
+        stt_beam_size=_get_int(
+            env, "STT_BEAM_SIZE", 1, minimum=1, maximum=10
+        ),
+        stt_vad_filter=_get_bool(env, "STT_VAD_FILTER", True),
+        audio_source=(
+            _get_str(env, "AUDIO_SOURCE", "microphone") or "microphone"
+        ).lower(),
+        audio_sample_rate=_get_int(
+            env, "AUDIO_SAMPLE_RATE", 16_000, minimum=8_000, maximum=48_000
+        ),
+        audio_channels=_get_int(
+            env, "AUDIO_CHANNELS", 1, minimum=1, maximum=2
+        ),
+        audio_block_ms=_get_int(
+            env, "AUDIO_BLOCK_MS", 100, minimum=20, maximum=1000
+        ),
+        audio_device=_get_str(env, "AUDIO_DEVICE") or None,
+
         memory_backend=(
             _get_str(env, "MEMORY_BACKEND", "sqlite") or "sqlite"
         ).lower(),
@@ -466,6 +537,20 @@ def load_settings(
         embedding_provider=(
             _get_str(env, "EMBEDDING_PROVIDER", "null") or "null"
         ).lower(),
+        embedding_model=(
+            _get_str(env, "EMBEDDING_MODEL", "nomic-embed-text")
+            or "nomic-embed-text"
+        ),
+        embedding_dimension=_get_int(
+            env, "EMBEDDING_DIMENSION", 768, minimum=1
+        ),
+        vector_store=(
+            _get_str(env, "VECTOR_STORE", "chroma") or "chroma"
+        ).lower(),
+        vector_store_path=_get_str(
+            env, "VECTOR_STORE_PATH",
+            str(paths.memory / "vectors"),
+        ) or str(paths.memory / "vectors"),
         creator_auth_method=(
             _get_str(env, "CREATOR_AUTH_METHOD", "pin") or "pin"
         ).lower(),

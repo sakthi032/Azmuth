@@ -548,3 +548,19 @@ def test_manager_close_is_idempotent(settings: Settings, tmp_path: Path) -> None
     manager = build_memory_manager(settings)
     manager.close()
     manager.close()  # must not raise
+
+
+def test_manager_recall_hybrid_combines_bm25_and_vector(
+    settings: Settings, backend: MemoryBackend
+) -> None:
+    """recall_hybrid retrieves records via BM25 + vector fusion."""
+    manager = build_memory_manager(settings, backend=backend)
+    try:
+        manager.store("Python async event loop tutorial", user_id="creator")
+        manager.store("Database normalization rules", user_id="creator")
+
+        hits = manager.recall_hybrid("Python async", user_id="creator", top_k=2)
+        assert len(hits) >= 1
+        assert "Python" in hits[0].content
+    finally:
+        manager.close()

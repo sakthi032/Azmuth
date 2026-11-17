@@ -44,21 +44,33 @@ def _tokens(text: str) -> set[str]:
 def _score(search: str, target: str) -> float:
     """Word-overlap score in [0, 1] between two element names.
 
-    * 1.0  - exact case-insensitive match
-    * high - all search tokens present in the target
-    * low  - partial overlap
-    * 0.0  - no meaningful overlap
+    Uses a bidirectional measure: the fraction of tokens matched relative
+    to the *union* of both token sets (a Jaccard-style score). This
+    penalizes matches where the target has many extra words.
+
+    * 1.0 — exact case-insensitive match
+    * high — most tokens from both sides overlap
+    * low — partial overlap
+    * 0.0 — no meaningful overlap
     """
     if not search or not target:
         return 0.0
     if search.strip().lower() == target.strip().lower():
         return 1.0
+
     s_tokens = _tokens(search)
     t_tokens = _tokens(target)
-    if not s_tokens:
+    if not s_tokens or not t_tokens:
         return 0.0
+
     overlap = s_tokens & t_tokens
-    return len(overlap) / len(s_tokens)
+    if not overlap:
+        return 0.0
+
+    # Weighted: 70% overlap-of-query + 30% overlap-of-target
+    q_overlap = len(overlap) / len(s_tokens)
+    t_overlap = len(overlap) / len(t_tokens)
+    return 0.7 * q_overlap + 0.3 * t_overlap
 
 
 @dataclass(frozen=True, slots=True)

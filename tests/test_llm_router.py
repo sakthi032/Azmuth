@@ -108,13 +108,11 @@ def test_default_registry_contains_verified_models() -> None:
     """
     r = build_default_registry()
     names = {m.name for m in r.all()}
-    assert "nvidia/nemotron-3-super-120b-a12b" in names
+    assert "z-ai/glm-5.3" in names
     assert "nvidia/nemotron-3-ultra-550b-a55b" in names
     assert "nvidia/nemotron-3.5-lightning-30b-a3b" in names
-    assert "openai/gpt-oss-20b" in names
-    assert "z-ai/glm-5.3" in names
-    assert "z-ai/glm-5.3-flash" in names
     assert "deepseek-ai/deepseek-v4.1-flash" in names
+    assert "llama-3.3-70b-versatile" in names
 
 
 def test_default_registry_coding_prefers_deepseek() -> None:

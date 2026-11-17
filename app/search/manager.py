@@ -115,32 +115,49 @@ class SearchManager:
 
     # -- search ------------------------------------------------------------
     async def search(self, query: SearchQuery) -> SearchResponse:
-        """Try providers in fallback order until one returns results."""
+        """Try providers in configured order until one returns results."""
+        import time
+        from app.search.models import SearchResponse
+
         started = time.perf_counter()
         last_error: Exception | None = None
-        last_provider_used: str = "none"
+        last_provider: str = "none"
 
         for name in self._fallback_order:
             try:
                 provider = self._registry.create(name)
             except ProviderNotFoundError:
-                logger.debug(
-                    "provider %r not registered — skipping", name,
-                    extra={"event": "SEARCH_PROVIDER_MISSING", "provider": name},
-                )
                 continue
 
             try:
-                response = await provider.search(query)
+                raw = await provider.search(query)
             except ProviderError as exc:
                 last_error = exc
                 logger.warning(
                     "search via %s failed: %s", name, exc,
-                    extra={
-                        "event": "SEARCH_PROVIDER_FAILED",
-                        "provider": name,
-                        "error": str(exc),
-                    },
+                    extra={"event": "SEARCH_PROVIDER_FAILED",
+                           "provider": name, "error": str(exc)},
+                )
+                continue
+
+            # --- NEW: normalize both shapes ---
+            # Some providers return SearchResponse; some return a bare
+            # list[SearchResult]. Handle both here so the loop is uniform.
+            if hasattr(raw, "results"):
+                response: SearchResponse = raw
+            elif isinstance(raw, list):
+                response = SearchResponse(
+                    query=query,
+                    results=tuple(raw),
+                    provider=name,
+                    reference_block="",
+                    has_reference=False,
+                )
+            else:
+                logger.warning(
+                    "search via %s returned unexpected type %s",
+                    name, type(raw).__name__,
+                    extra={"event": "SEARCH_PROVIDER_BAD_TYPE"},
                 )
                 continue
 
@@ -148,37 +165,33 @@ class SearchManager:
                 logger.info(
                     "search via %s returned %d results",
                     name, len(response.results),
-                    extra={
-                        "event": "SEARCH_SUCCESS",
-                        "provider": name,
-                        "count": len(response.results),
-                    },
+                    extra={"event": "SEARCH_SUCCESS",
+                           "provider": name,
+                           "count": len(response.results)},
                 )
                 return response
 
-            last_provider_used = name
+            last_provider = name
             logger.warning(
                 "search via %s returned 0 results — falling through",
                 name,
                 extra={"event": "SEARCH_EMPTY", "provider": name},
             )
 
-        # Every provider failed or returned empty.
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        # All providers failed or returned empty.
+        elapsed_ms = (time.perf_counter() - started) * 1000
         error_message = (
-            str(last_error)
-            if last_error is not None
+            str(last_error) if last_error is not None
             else "all search providers returned no results"
         )
         logger.warning(
             "search exhausted all providers",
             extra={"event": "SEARCH_EXHAUSTED", "error": error_message},
         )
-
         return SearchResponse(
             query=query,
             results=(),
-            provider=last_provider_used,
+            provider=last_provider,
             reference_block="",
             has_reference=False,
             elapsed_ms=elapsed_ms,

@@ -15,6 +15,7 @@ from app.voice.tts.base import (
 from app.voice.tts.manager import SpeechOutcome, TTSManager, build_tts_manager
 from app.voice.tts.null import NullTextToSpeechProvider
 from app.voice.tts.providers import build_tts_registry
+from app.voice.tts.edge_tts_provider import EdgeTTSProvider
 
 __all__ = [
     "NullTextToSpeechProvider",
@@ -26,4 +27,5 @@ __all__ = [
     "VoiceProfile",
     "build_tts_manager",
     "build_tts_registry",
+    "EdgeTTSProvider"
 ]

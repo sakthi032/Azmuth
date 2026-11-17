@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
-
+import re
 from app.brain.prompts import build_system_prompt
 from app.brain.context import RuntimeContext
 from app.brain.purpose import detect_purpose
@@ -47,6 +47,8 @@ from app.search.models import SearchQuery
 from app.security.modes import Principal
 from app.tools.manager import ToolManager
 from app.voice.input_manager import UserInput
+from app.brain.planner import AutonomousPlanner, PlanStatus, StepStatus, is_planning_goal
+from app.brain.loop_guard import LoopGuard, LoopDetectedError
 
 logger = get_logger("brain.pipeline")
 
@@ -101,6 +103,7 @@ class BrainResponse:
     used_memory: bool = False
     iterations: int = 0
     stopped_reason: str = "final"
+    spoken_text: str = "" 
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -128,9 +131,12 @@ class Brain:
         search: SearchManager,
         event_bus: EventBus | None = None,
         llm_router: LLMRouter | None = None,
-        max_tool_iterations: int = 12,
+        max_tool_iterations: int = 12,          # LLM/tool loop cap (was 5 — raised to 12)
+        planner_round_budget: int = 10,         # Planner tool calls per round
+        planner_total_budget: int = 50,         # Planner total tool call ceiling
         temperature: float = 0.7,
         memory_top_k: int = 3,
+        planner: AutonomousPlanner | None = None,
     ) -> None:
         self._llm = llm
         self._llm_router = llm_router
@@ -147,7 +153,26 @@ class Brain:
         self._identity_block: str = ""
         self._location_service = None
         self._prefer_local: bool = False
-        # self._prefer_local: bool = True
+        ws_root = None
+        if self._tools is not None:
+            try:
+                approved = self._tools.permissions.workspace_policy.approved_roots
+                if approved:
+                    ws_root = approved[0]
+            except Exception:
+                pass
+        self._planner = planner or AutonomousPlanner(
+            llm=self._llm,
+            tools=self._tools,
+            event_bus=self._event_bus,
+            workspace_root=ws_root or Path.cwd(),
+            round_tool_budget=planner_round_budget,
+            total_tool_budget=planner_total_budget,
+        )
+
+    @property
+    def planner(self) -> AutonomousPlanner:
+        return self._planner
 
     def set_prefer_local(self, value: bool) -> None:
         """Route every subsequent turn to the local backend.
@@ -160,9 +185,8 @@ class Brain:
         self._prefer_local = value
 
     def _handle_local_toggle(self, enabled: bool) -> None:
-        if self._brain is None:
-            return
-        self._brain.set_prefer_local(enabled)
+        """Toggle local-only LLM routing for this Brain instance."""
+        self.set_prefer_local(enabled)
         
         
     def attach_identity(self, *, identity_block: str, location_service) -> None:
@@ -253,6 +277,120 @@ class Brain:
             )
         )
 
+        # ---- Autonomous Agent Planning for multi-step compound goals -----
+        if is_planning_goal(user_input.text):
+            try:
+                logger.info("detected multi-step autonomous goal; routing to AutonomousPlanner")
+                if self._llm_router is not None:
+                    try:
+                        self._planner.set_llm(self._llm_router.for_purpose(ModelPurpose.REASONING))
+                    except Exception:
+                        pass
+
+                plan = await self._planner.create_plan(user_input.text, context=retrieval_context or "")
+
+                # ---- Multi-round execution loop (Requirement 3 & 8) ----
+                # Execute up to max_tool_iterations rounds; each round can spend
+                # plan.round_tool_budget tool calls before suspending.  We loop
+                # until the plan is complete/failed or we exhaust the round limit.
+                max_planner_rounds = self._max_tool_iterations
+                for _round in range(max_planner_rounds):
+                    plan = await self._planner.execute_plan(
+                        plan, principal=principal, confirmer=confirmer
+                    )
+                    if plan.is_complete:
+                        break
+                    # Plan still RUNNING with pending steps — another round needed
+                    logger.info(
+                        "Planner round %d/%d complete; plan still has pending steps (plan_id=%s)",
+                        _round + 1, max_planner_rounds, plan.id,
+                    )
+                else:
+                    # Exhausted all rounds without finishing — fail the plan (Requirement 9)
+                    if not plan.is_complete:
+                        plan.status = PlanStatus.FAILED
+                        from app.brain.planner import _now as _planner_now
+                        plan.completed_at = _planner_now()
+                        pending_titles = [s.title for s in plan.steps if s.status == StepStatus.PENDING]
+                        plan.summary = (
+                            f"Plan could not complete within {max_planner_rounds} execution rounds. "
+                            f"Remaining unfinished steps: {', '.join(pending_titles) or 'none'}. "
+                            f"Tool budget used: {plan.tools_used}/{plan.total_tool_budget}."
+                        )
+                        logger.warning(
+                            "Planner exceeded %d rounds without completing plan %s",
+                            max_planner_rounds, plan.id,
+                        )
+
+                plan_tool_records: list[ToolExecutionRecord] = []
+                used_search = False
+                for step in plan.steps:
+                    if step.tool_name:
+                        plan_tool_records.append(
+                            ToolExecutionRecord(
+                                name=step.tool_name,
+                                arguments=step.arguments,
+                                success=(step.status.value == "completed"),
+                                output=step.result,
+                                error=step.error,
+                            )
+                        )
+                        if step.tool_name == "search_web":
+                            used_search = True
+
+                plan_blocks = [
+                    plan.render_markdown(),
+                    "",
+                    "---",
+                    "",
+                ]
+                if plan.status == PlanStatus.COMPLETED:
+                    synthesized_results = [s.result for s in plan.steps if s.action_type == "synthesize" and s.result]
+                    if synthesized_results:
+                        plan_blocks.extend(synthesized_results)
+                    else:
+                        plan_blocks.append(plan.summary)
+
+                    spoken_summary = (
+                        f"I have successfully executed and verified the autonomous plan for your request. "
+                        f"{len(plan.steps)} steps executed and verified."
+                    )
+                    if plan.deliverables:
+                        spoken_summary += f" Deliverables: {', '.join(plan.deliverables)}."
+                else:
+                    plan_blocks.append(f"**Execution Notice:** {plan.summary}")
+                    failed_details = [f"- Step {s.id} ({s.title}): {s.error}" for s in plan.steps if s.status == StepStatus.FAILED]
+                    if failed_details:
+                        plan_blocks.append("\n**Failure Breakdown:**\n" + "\n".join(failed_details))
+                    spoken_summary = f"Plan execution encountered an error and could not be verified: {plan.summary}"
+
+                final_text = "\n\n".join(plan_blocks) + f"\n\n<spoken>\n{spoken_summary}\n</spoken>"
+                display_text, spoken_text = _split_spoken_block(final_text)
+                if not spoken_text:
+                    spoken_text = spoken_summary
+                final_text = display_text
+                session.add_assistant_message(final_text)
+
+                return BrainResponse(
+                    text=final_text,
+                    session_id=session.id,
+                    language=resolved_language,
+                    purpose="planning",
+                    model=getattr(self._llm, "model", "planner"),
+                    provider=getattr(self._llm, "provider", "autonomous_planner"),
+                    tool_calls=tuple(plan_tool_records),
+                    used_search=used_search,
+                    used_memory=used_memory,
+                    iterations=plan.rounds_executed,
+                    stopped_reason="plan_completed" if plan.status == PlanStatus.COMPLETED else "plan_failed",
+                    spoken_text=spoken_text,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Autonomous planner encountered an issue, falling back to conversational loop: %s",
+                    exc,
+                )
+
         # ---- LLM / tool loop ---------------------------------------------
         final_text = ""
         tool_records: list[ToolExecutionRecord] = []
@@ -263,6 +401,8 @@ class Brain:
         purpose = detect_purpose(user_input.text, language=language_hint)
         last_model = ""
         last_provider = ""
+        loop_guard = LoopGuard()
+        loop_aborted = False
         for iteration in range(1, self._max_tool_iterations + 1):
             iterations = iteration
             response = await self._chat_with_fallback(
@@ -299,6 +439,15 @@ class Brain:
             messages.append(Message(Role.ASSISTANT, assistant_content))
 
             for call, call_id in zip(calls, call_ids):
+                try:
+                    loop_guard.check(call.name, call.arguments)
+                except LoopDetectedError as exc:
+                    logger.warning("LoopGuard detected repetitive tool call: %s", exc)
+                    stopped_reason = "loop_detected"
+                    final_text = f"Tool execution interrupted by LoopGuard: {exc.reason}"
+                    loop_aborted = True
+                    break
+
                 record = await self._execute_tool(
                     call,
                     principal=principal,
@@ -324,13 +473,16 @@ class Brain:
                     messages.append(
                         Message(Role.SYSTEM, _format_tool_result(record))
                     )
+
+            if loop_aborted:
+                break
         else:
             stopped_reason = "max_iterations"
             tool_names = ", ".join(r.name for r in tool_records) or "none"
             final_text = (
-                f"I reached the tool-call limit for this turn "
+                f"I reached the maximum tool-call rounds for this turn "
                 f"({self._max_tool_iterations} rounds). "
-                f"Tools I tried: {tool_names}. "
+                f"Tools I used: {tool_names}. "
                 f"The request may need a different approach — "
                 f"could you describe what you want more specifically?"
             )
@@ -352,6 +504,11 @@ class Brain:
                 },
             )
             final_text = fallback_message(expected_language=resolved_language)
+            
+        display_text, spoken_text = _split_spoken_block(final_text)
+        if not spoken_text:
+            spoken_text = _fallback_spoken(display_text)
+        final_text = display_text
         session.add_assistant_message(final_text)
 
         # Observe the language the model actually produced. This replaces
@@ -370,6 +527,7 @@ class Brain:
             used_memory=used_memory,
             iterations=iterations,
             stopped_reason=stopped_reason,
+            spoken_text=spoken_text, 
         )
 
     # -- provider dispatch -------------------------------------------------
@@ -564,6 +722,46 @@ def _tool_result_text(record: ToolExecutionRecord) -> str:
         return str(output)
     return record.error or "unknown error"
 
+
+_SPOKEN_RE = re.compile(
+    r"<spoken>\s*(.*?)\s*</spoken>", re.DOTALL | re.IGNORECASE
+)
+
+
+def _split_spoken_block(text: str) -> tuple[str, str]:
+    """Return (display_text, spoken_text).
+
+    If the model followed the <spoken> tag convention, extract the
+    spoken version and strip the block from the display text. If the
+    tag is missing, spoken_text is '' and the caller falls back.
+    """
+    if not text:
+        return text, ""
+    match = _SPOKEN_RE.search(text)
+    if not match:
+        return text, ""
+    spoken = match.group(1).strip()
+    display = (text[: match.start()] + text[match.end():]).strip()
+    return display, spoken
+
+
+def _fallback_spoken(text: str) -> str:
+    """Extract a short spoken version when the model omitted <spoken>.
+
+    Uses the first sentence of the first paragraph. Good enough as a
+    safety net — the model usually complies, but this guarantees TTS
+    always has something reasonable to speak.
+    """
+    if not text:
+        return ""
+    first_para = text.split("\n\n")[0].strip()
+    sentences = re.split(r"(?<=[.!?])\s+", first_para)
+    if sentences:
+        first = sentences[0].strip()
+        if len(first) > 240:
+            first = first[:237] + "..."
+        return first
+    return first_para[:240]
 
 def _format_tool_result(record: ToolExecutionRecord) -> str:
     """Marked block for a SYSTEM message (text-parse fallback path)."""

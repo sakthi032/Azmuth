@@ -145,6 +145,10 @@ class Azmuth:
     def plugins(self) -> PluginManager:
         return self._plugins
 
+    @property
+    def planner(self):
+        return self._brain.planner
+
     # -- pipeline ----------------------------------------------------------
     async def respond(
         self,
@@ -169,13 +173,8 @@ class Azmuth:
         confirmer: Confirmer | None = None,
         *,
         principal: Principal | None = None,
-    ) -> tuple[str, str, str, str]:
-        """UI responder: return ``(reply_text, session_id)``.
-
-        ``confirmer`` is positional-or-keyword so the UI's bridge can pass
-        it positionally. When omitted, dangerous tools with a
-        confirmation requirement are refused by the pipeline.
-        """
+    ) -> tuple[str, str, str, str, str]:
+        """UI responder: returns (text, session_id, model, provider, spoken_text)."""
         if principal is None:
             principal = self._authenticator.current_principal
         response = await self.respond(
@@ -184,7 +183,13 @@ class Azmuth:
             principal=principal,
             confirmer=confirmer,
         )
-        return response.text, response.session_id, response.model, response.provider
+        return (
+            response.text,
+            response.session_id,
+            response.model,
+            response.provider,
+            response.spoken_text,
+        )
 
     # -- lifecycle ---------------------------------------------------------
     async def startup(self) -> None:
@@ -275,7 +280,15 @@ def build_azmuth(
     language_manager = build_language_manager(settings)
 
     # ---- security --------------------------------------------------------
-    perms = permissions or PermissionManager()
+    if permissions is None:
+        from app.security import ProjectWorkspacePolicy
+        perms = PermissionManager(
+            workspace_policy=ProjectWorkspacePolicy.from_paths([settings.paths.root])
+        )
+    else:
+        perms = permissions
+        if not perms.workspace_policy.approved_roots:
+            perms.add_approved_workspace(settings.paths.root)
     auth = authenticator or Authenticator()
     if authenticator is None:
         from app.security import build_default_methods
@@ -303,7 +316,7 @@ def build_azmuth(
 
     # ---- search ----------------------------------------------------------
     primary = settings.search_provider_order[0] if settings.search_provider_order else "null"
-    search_manager = build_search_manager(primary)
+    search_manager = search or build_search_manager(primary)
     # ---- automation ------------------------------------------------------
     from app.automation import WindowsAutomationImpl
     automation = WindowsAutomationImpl()
@@ -348,10 +361,18 @@ def build_azmuth(
         plugins.register_tools(tool_manager)
 
     # ---- voice -----------------------------------------------------------
-    wake_detector = wake or build_wake_word_detector(settings, stt=stt)
+    from app.voice.sources import build_audio_source
+    from app.voice.stt import build_stt_provider
+
+    effective_stt = stt if stt is not None else build_stt_provider(settings)
+    audio_source = build_audio_source(settings)
+    wake_detector = wake or build_wake_word_detector(
+        settings, stt=effective_stt
+    )
     voice_manager = voice or build_voice_input_manager(
         language=language_manager,
-        stt=stt,
+        source=audio_source,
+        stt=effective_stt,
         wake=wake_detector,
         event_bus=bus,
     )
