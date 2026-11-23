@@ -3,24 +3,31 @@
 Every tool invocation in Azmuth passes through :meth:`ToolManager.invoke`,
 which enforces:
 
-    selection      → name resolves to a registered, available tool
-    permission     → the Principal's mode satisfies the capability policy
-    validation     → arguments match the tool's JSON-schema subset
-    confirmation   → destructive capabilities require explicit user approval
-    execution      → the tool runs; exceptions are wrapped
-    event emission → TOOL_STARTED / TOOL_COMPLETED / TOOL_FAILED
+    selection      -> name resolves to a registered, available tool
+    permission     -> the Principal's mode satisfies the capability policy
+    validation     -> arguments match the tool's JSON-schema subset
+    confirmation   -> destructive capabilities require explicit user approval
+    execution      -> the tool runs; exceptions are wrapped
+    event emission -> TOOL_STARTED / TOOL_COMPLETED / TOOL_FAILED
 
 Ordering rationale:
 
-* **permission before validation** — arguments to a capability the principal
+* **permission before validation** -- arguments to a capability the principal
   cannot use are none of their business, and refusing earlier avoids leaking
   schema details.
-* **validation before confirmation** — the user should confirm a *specific*
+* **validation before confirmation** -- the user should confirm a *specific*
   action with valid arguments, not an under-specified one.
-* **confirmation before execution** — the whole point of the gate.
+* **confirmation before execution** -- the whole point of the gate.
 
 The manager is async and side-effect free with respect to the tool. It
 never mutates the Principal, never caches results, and never retries.
+
+Performance note (Phase 1.3):
+  ``tool.is_available()`` can make network calls (e.g. TCP connect to
+  Chrome DevTools ports).  The manager now caches availability results with
+  a configurable TTL (default 3 s) so the check runs at most once per TTL
+  window per tool.  The cache is bypassed in ``invoke()`` with a shorter TTL
+  (0.5 s) to keep execution-time checks accurate.
 """
 
 from __future__ import annotations
@@ -48,6 +55,11 @@ from app.tools.schema import validate as validate_arguments
 
 logger = get_logger("tools")
 
+#: Default TTL (seconds) for caching tool.is_available() in list_metadata().
+_DEFAULT_LIST_TTL: float = 3.0
+#: Shorter TTL used in invoke() to keep execution-time checks accurate.
+_DEFAULT_INVOKE_TTL: float = 0.5
+
 
 class ToolManager:
     """Register tools and run them safely under a Principal."""
@@ -58,10 +70,14 @@ class ToolManager:
         registry: ToolRegistry | None = None,
         *,
         event_bus: EventBus | None = None,
+        availability_cache_ttl: float = _DEFAULT_LIST_TTL,
     ) -> None:
         self._permissions = permissions
         self._registry = registry if registry is not None else ToolRegistry()
         self._event_bus = event_bus
+        self._availability_cache_ttl = availability_cache_ttl
+        # Cache: tool_name -> (is_available: bool, timestamp: float)
+        self._availability_cache: dict[str, tuple[bool, float]] = {}
 
     # -- registration ------------------------------------------------------
     @property
@@ -74,6 +90,9 @@ class ToolManager:
 
     def register(self, tool: Tool, *, replace: bool = False) -> None:
         self._registry.register(tool, replace=replace)
+        # Invalidate any cached availability for this tool name so the new
+        # registration is reflected immediately.
+        self._availability_cache.pop(tool.name, None)
         logger.info(
             "tool registered",
             extra={
@@ -84,6 +103,7 @@ class ToolManager:
         )
 
     def unregister(self, name: str) -> bool:
+        self._availability_cache.pop(name, None)
         return self._registry.unregister(name)
 
     # -- discovery ---------------------------------------------------------
@@ -92,6 +112,33 @@ class ToolManager:
 
     def metadata(self, name: str) -> ToolMetadata:
         return self._registry.get(name).metadata()
+
+    # -- availability cache ------------------------------------------------
+    def _check_available(self, tool: Tool, *, ttl: float) -> bool:
+        """Return tool.is_available() with TTL caching.
+
+        Results are cached for ``ttl`` seconds to avoid repeated expensive
+        calls (e.g. TCP connects to Chrome DevTools ports).  Exceptions
+        from ``is_available()`` are propagated unchanged -- the caller
+        decides how to handle them.
+        """
+        now = time.monotonic()
+        cached = self._availability_cache.get(tool.name)
+        if cached is not None:
+            value, ts = cached
+            if now - ts < ttl:
+                return value
+        # Cache miss or expired -- call the real check
+        result = tool.is_available()
+        self._availability_cache[tool.name] = (result, now)
+        return result
+
+    def invalidate_availability(self, name: str | None = None) -> None:
+        """Invalidate the availability cache for one tool (or all if None)."""
+        if name is None:
+            self._availability_cache.clear()
+        else:
+            self._availability_cache.pop(name, None)
 
     def list_metadata(
         self, *, principal: Principal | None = None
@@ -103,11 +150,14 @@ class ToolManager:
         available (see :meth:`Tool.is_available`) are also filtered out.
         This is exactly the list the brain will hand to the LLM for tool
         selection.
+
+        Availability is cached for ``availability_cache_ttl`` seconds to
+        avoid repeated expensive network probes (Phase 1.3).
         """
         result: list[ToolMetadata] = []
         for tool in self._registry.tools():
             try:
-                if not tool.is_available():
+                if not self._check_available(tool, ttl=self._availability_cache_ttl):
                     continue
             except Exception:  # noqa: BLE001 - see Tool.is_available contract
                 logger.exception(
@@ -143,13 +193,13 @@ class ToolManager:
 
         Raises:
 
-        * :class:`ToolNotFoundError`      — unknown tool name.
-        * :class:`PermissionDeniedError`  — capability denied.
-        * :class:`ToolValidationError`    — arguments invalid.
-        * :class:`ConfirmationRequiredError` — destructive capability
+        * :class:`ToolNotFoundError`      -- unknown tool name.
+        * :class:`PermissionDeniedError`  -- capability denied.
+        * :class:`ToolValidationError`    -- arguments invalid.
+        * :class:`ConfirmationRequiredError` -- destructive capability
           without explicit confirmation.
-        * :class:`ProviderUnavailableError` — tool is not currently available.
-        * :class:`ToolExecutionError`     — the tool raised while running.
+        * :class:`ProviderUnavailableError` -- tool is not currently available.
+        * :class:`ToolExecutionError`     -- the tool raised while running.
         """
         arguments = dict(arguments or {})
 
@@ -167,8 +217,11 @@ class ToolManager:
             )
 
         # ---- availability ------------------------------------------------
+        # Use a short TTL for invoke() so the check is reasonably fresh at
+        # execution time, but still benefits from the cache when multiple
+        # tools are invoked in rapid succession (Phase 1.3).
         try:
-            available = tool.is_available()
+            available = self._check_available(tool, ttl=_DEFAULT_INVOKE_TTL)
         except Exception as exc:  # noqa: BLE001
             raise ProviderUnavailableError(
                 f"tool {name!r} availability check failed: {exc}"
@@ -185,7 +238,6 @@ class ToolManager:
                 f"invalid arguments for {name!r}: " + "; ".join(errors)
             )
 
-        # ---- confirmation ------------------------------------------------
         # ---- confirmation ------------------------------------------------
         # The PermissionManager combines the capability policy and the tool's
         # own flag additively, so we can call it unconditionally.

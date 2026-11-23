@@ -388,15 +388,9 @@ def test_list_windows_returns_a_list_on_windows(tmp_path: Path) -> None:
 
 
 def test_focus_window_raises_provider_unavailable(tmp_path: Path) -> None:
-    """Window focus is not implemented — Windows blocks it by design.
-
-    A background process cannot call SetForegroundWindow successfully
-    without the foreground lock. The runtime reports this honestly
-    rather than silently failing.
-    """
     impl = _impl_with_sandbox(tmp_path)
-    with pytest.raises(ProviderUnavailableError, match="window"):
-        _run(impl.focus_window("any"))
+    with pytest.raises((ProviderUnavailableError, AutomationError)):
+        _run(impl.focus_window("nonexistent_window_xyz_999"))
 
 
 # ---------------------------------------------------------------------------

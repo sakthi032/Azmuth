@@ -124,7 +124,8 @@ class UIState:
         self._revision = 0
         self._next_id = 1
         self._listeners: list[Listener] = []
-
+        self._streaming_entry_id: int | None = None
+        self._dispatcher: Callable[[Callable[[], None]], None] | None = None
     # -- read-only views ---------------------------------------------------
     @property
     def conversation(self) -> tuple[ConversationEntry, ...]:
@@ -169,13 +170,34 @@ class UIState:
         except ValueError:
             pass
 
+    def set_dispatcher(
+        self, dispatcher: Callable[[Callable[[], None]], None] | None
+    ) -> None:
+        """Route listener notifications through ``dispatcher``.
+
+        The Tk app passes ``lambda fn: root.after(0, fn)`` here so all
+        listener callbacks fire on the Tk main thread. Left as None in
+        tests and headless contexts, where listeners run inline.
+        """
+        self._dispatcher = dispatcher
+
+    @property
+    def streaming_entry_id(self) -> int | None:
+        return self._streaming_entry_id
+
     def _touch(self) -> None:
         self._revision += 1
-        for listener in tuple(self._listeners):
-            try:
-                listener(self)
-            except Exception:  # noqa: BLE001
-                self._listeners.remove(listener)
+        def _run() -> None:
+            for listener in tuple(self._listeners):
+                try:
+                    listener(self)
+                except Exception:  # noqa: BLE001
+                    self._listeners.remove(listener)
+
+        if self._dispatcher is not None:
+            self._dispatcher(_run)
+        else:
+            _run()
 
     # -- transcript --------------------------------------------------------
     def add_user_message(
@@ -206,6 +228,53 @@ class UIState:
         self, text: str, *, level: LogLevel = LogLevel.INFO
     ) -> ConversationEntry:
         return self._append(Speaker.SYSTEM, text, level=level)
+
+    def begin_stream(
+        self,
+        *,
+        language: str | None = None,
+        source: str = "text",
+        model: str = "",
+        provider: str = "",
+    ) -> int:
+        """Create an empty AZMUTH entry and mark it as the live stream."""
+        entry = ConversationEntry(
+            id=self._next_id,
+            speaker=Speaker.AZMUTH,
+            text="",
+            language=language,
+            source=source,
+            model=model,
+            provider=provider,
+        )
+        self._next_id += 1
+        self._conversation.append(entry)
+        self._streaming_entry_id = entry.id
+        self._touch()
+        return entry.id
+
+    def append_stream(self, entry_id: int, delta: str) -> None:
+        """Append ``delta`` to entry ``entry_id``. No-op if missing."""
+        if not delta:
+            return
+        for i, entry in enumerate(self._conversation):
+            if entry.id == entry_id:
+                self._conversation[i] = replace(entry, text=entry.text + delta)
+                self._touch()
+                return
+
+    def finish_stream(
+        self, entry_id: int, *, final_text: str | None = None
+    ) -> None:
+        """End streaming. Optional ``final_text`` overwrites accumulated text."""
+        for i, entry in enumerate(self._conversation):
+            if entry.id == entry_id:
+                new_text = final_text if final_text is not None else entry.text
+                self._conversation[i] = replace(entry, text=new_text)
+                break
+        self._streaming_entry_id = None
+        self._touch()
+
 
     def _append(
         self,

@@ -18,6 +18,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from app.ui.state import Speaker, UIState
+from app.tasks.time_parser import IST
 
 # ── Palette ──────────────────────────────────────────────────────────
 _BG      = "#1e1e2e"
@@ -67,6 +68,7 @@ class TranscriptView(tk.Frame):
         self._last_rendered_id = 0
         self._block_counter = 0
         self._code_blocks: dict[str, str] = {}
+        self._stream_entries: dict[int, dict] = {}
 
         # Thinking indicator state
         self._thinking_active = False
@@ -132,6 +134,12 @@ class TranscriptView(tk.Frame):
         t.tag_configure("body_azmuth", foreground=_FG, spacing1=1, spacing3=3)
         t.tag_configure("body_system", foreground=_SUB0, spacing1=1, spacing3=3)
         t.tag_configure("body_error", foreground=_RED, spacing1=1, spacing3=3)
+        t.tag_configure("name_reminder", foreground=_YELLOW,
+                        font=("Segoe UI", 12, "bold"),
+                        spacing1=16, spacing3=4)
+        t.tag_configure("body_reminder", foreground="#f9e2af", background="#2c271e",
+                        font=("Segoe UI", 11, "bold"), spacing1=4, spacing3=4,
+                        lmargin1=12, lmargin2=12)
 
         t.tag_configure("meta", foreground=_DIM,
                         font=("Segoe UI", 9), spacing1=4, spacing3=18)
@@ -240,7 +248,13 @@ class TranscriptView(tk.Frame):
         self._text.see("end")
 
     def _render_meta(self, entry) -> None:
-        meta_parts = [entry.created_at.strftime("%H:%M:%S")]
+        created = entry.created_at
+        if created.tzinfo is None:
+            # Timestamps are stored naive; treat them as UTC.
+            from datetime import timezone as _tz
+            created = created.replace(tzinfo=_tz.utc)
+        ist_time = created.astimezone(IST)
+        meta_parts = [ist_time.strftime("%I:%M:%S %p").lstrip("0") + " IST"]
         if entry.language:
             meta_parts.append(entry.language)
         meta_parts.append(entry.source)
@@ -631,9 +645,52 @@ class TranscriptView(tk.Frame):
 
     # ── State subscription ─────────────────────────────────────────────
     def _on_state_changed(self, state: UIState) -> None:
+        streaming_id = state.streaming_entry_id
+
+        # ── Live streaming bubble ──
+        if streaming_id is not None:
+            entry = next(
+                (e for e in state.conversation if e.id == streaming_id), None
+            )
+            if entry is not None:
+                if streaming_id not in self._stream_entries:
+                    self._clear_welcome()
+                    self._text.configure(state="normal")
+                    self._text.insert("end", "Azmuth\n", ("name_azmuth",))
+                    start = self._text.index("end - 1c")
+                    self._text.configure(state="disabled")
+                    self._stream_entries[streaming_id] = {
+                        "start": start, "text": "",
+                    }
+                    self._last_rendered_id = entry.id
+                tracked = self._stream_entries[streaming_id]
+                delta = entry.text[len(tracked["text"]):]
+                if delta:
+                    self._text.configure(state="normal")
+                    self._text.insert("end", delta, ("body_azmuth",))
+                    self._text.configure(state="disabled")
+                    self._text.see("end")
+                    tracked["text"] = entry.text
+
+        # ── Stream finished — re-render with markdown ──
+        if streaming_id is None and self._stream_entries:
+            for entry_id, tracked in list(self._stream_entries.items()):
+                final_entry = next(
+                    (e for e in state.conversation if e.id == entry_id), None
+                )
+                if final_entry is not None:
+                    self._text.configure(state="normal")
+                    self._text.delete(tracked["start"], "end")
+                    self._text.configure(state="disabled")
+                    self._render_entry(final_entry)
+            self._stream_entries.clear()
+            
         new_entries = [
-            e for e in state.conversation if e.id > self._last_rendered_id
-        ]
+            e for e in state.conversation
+            if e.id > self._last_rendered_id
+            and e.id not in self._stream_entries
+            and e.id != streaming_id
+         ]
         if not new_entries:
             return
 

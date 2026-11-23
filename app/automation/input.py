@@ -13,6 +13,14 @@ KEYEVENTF_UNICODE keystrokes under load.
 The primitives here are what the tools type_text and press_keys wrap.
 They are gated at the tool layer by ADVANCED_AUTOMATION and require
 creator mode plus confirmation.
+
+Multi-monitor fix (Phase 1.1):
+  ``GetSystemMetrics(0/1)`` only covers the primary monitor.  Mouse
+  coordinates must span the full virtual desktop.  MOUSEEVENTF_VIRTUALDESK
+  (0x4000) combined with MOUSEEVENTF_ABSOLUTE tells SendInput that the
+  normalised coordinates [0, 65535] map to the virtual desktop, not just
+  the primary screen.  We use SM_XVIRTUALSCREEN/SM_CXVIRTUALSCREEN to
+  get the correct origin and width.
 """
 
 from __future__ import annotations
@@ -49,6 +57,9 @@ _MOUSEEVENTF_MIDDLEDOWN = 0x0020
 _MOUSEEVENTF_MIDDLEUP = 0x0040
 _MOUSEEVENTF_WHEEL = 0x0800
 _MOUSEEVENTF_ABSOLUTE = 0x8000
+# Maps the [0,65535] normalised range to the virtual desktop (all monitors)
+# instead of just the primary screen.  Required for correct multi-monitor clicks.
+_MOUSEEVENTF_VIRTUALDESK = 0x4000
 
 _KEYEVENTF_KEYUP = 0x0002
 _KEYEVENTF_UNICODE = 0x0004
@@ -60,6 +71,12 @@ _GMEM_MOVEABLE = 0x0002
 
 _VK_CONTROL = 0x11
 _VK_V = 0x56
+
+# SM_* indices for the virtual desktop (Phase 1.1)
+_SM_XVIRTUALSCREEN = 76
+_SM_YVIRTUALSCREEN = 77
+_SM_CXVIRTUALSCREEN = 78
+_SM_CYVIRTUALSCREEN = 79
 
 
 # --------------------------------------------------------------------------
@@ -212,7 +229,7 @@ class InputController:
         Virtual-key input: pass ``vk``, leave ``scan=0``.
         Unicode input: pass ``vk=0``, set ``flags |= KEYEVENTF_UNICODE``,
         and put the codepoint in ``scan``. Windows requires exactly this
-        layout — see the KEYBDINPUT docs.
+        layout -- see the KEYBDINPUT docs.
         """
         inp = _INPUT()
         inp.type = _INPUT_KEYBOARD
@@ -229,21 +246,41 @@ class InputController:
                 except Exception:
                     pass
 
+    # -- virtual desktop metrics -------------------------------------------
+    def _virtual_screen(self) -> tuple[int, int, int, int]:
+        """Return (virt_x, virt_y, virt_w, virt_h) for the virtual desktop.
+
+        Falls back to primary screen dimensions when the metrics return 0
+        (non-Windows CI or mocked environments).
+        """
+        u32 = self._user32
+        virt_x = int(u32.GetSystemMetrics(_SM_XVIRTUALSCREEN))
+        virt_y = int(u32.GetSystemMetrics(_SM_YVIRTUALSCREEN))
+        virt_w = int(u32.GetSystemMetrics(_SM_CXVIRTUALSCREEN))
+        virt_h = int(u32.GetSystemMetrics(_SM_CYVIRTUALSCREEN))
+        if virt_w <= 1 or virt_h <= 1:
+            virt_x = 0
+            virt_y = 0
+            virt_w = int(u32.GetSystemMetrics(0))
+            virt_h = int(u32.GetSystemMetrics(1))
+        return virt_x, virt_y, virt_w, virt_h
+
     # -- mouse -------------------------------------------------------------
     async def move_mouse(
         self, x: int, y: int, *, duration: float = 0.0
     ) -> None:
         del duration
         self._require()
-        screen_w = self._user32.GetSystemMetrics(0)
-        screen_h = self._user32.GetSystemMetrics(1)
-        if screen_w <= 1 or screen_h <= 1:
+        virt_x, virt_y, virt_w, virt_h = self._virtual_screen()
+        if virt_w <= 1 or virt_h <= 1:
             raise AutomationError("could not determine screen size")
-        ax = int(x * 65535 / (screen_w - 1))
-        ay = int(y * 65535 / (screen_h - 1))
+        # Normalise (x, y) relative to virtual desktop origin
+        ax = int((x - virt_x) * 65535 / (virt_w - 1))
+        ay = int((y - virt_y) * 65535 / (virt_h - 1))
         self._send(
             self._mouse_input(
-                _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE, ax, ay
+                _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE | _MOUSEEVENTF_VIRTUALDESK,
+                ax, ay,
             )
         )
         logger.info(
@@ -334,7 +371,7 @@ class InputController:
         """Type text into the focused (or explicitly targeted) window.
 
         Default path: clipboard paste with focus enforcement. If paste
-        raises, this method raises — it never silently falls back to
+        raises, this method raises -- it never silently falls back to
         keystrokes, because keystrokes after a partial paste corrupt
         the result.
 
@@ -381,7 +418,7 @@ class InputController:
         """Write text to clipboard, ensure target is foreground, send Ctrl+V.
 
         Raises AutomationError if focus cannot be verified on the target.
-        Never falls back silently — the caller decides.
+        Never falls back silently -- the caller decides.
         """
         saved_text = await asyncio.to_thread(self._write_clipboard, text)
 
@@ -390,7 +427,7 @@ class InputController:
             if target_hwnd is not None:
                 already = self._get_foreground_hwnd() == target_hwnd
                 if not already:
-                    # Only force when necessary — SetForegroundWindow
+                    # Only force when necessary -- SetForegroundWindow
                     # resets internal keyboard focus and breaks pasting
                     # into child controls (Notepad's RichEdit, etc.).
                     focused = await asyncio.to_thread(
@@ -414,7 +451,7 @@ class InputController:
                         f"(title={actual_title!r}). Paste aborted."
                     )
 
-            # Diagnostic — log keyboard focus before paste. If this is 0
+            # Diagnostic -- log keyboard focus before paste. If this is 0
             # or points to the top-level window (not a child), Ctrl+V will
             # be silently dropped.
             logger.info(
@@ -460,7 +497,7 @@ class InputController:
     def _write_clipboard(payload: str) -> str | None:
         """Write payload to the Win32 clipboard. Returns previous text.
 
-        All restype/argtypes are declared explicitly — without them,
+        All restype/argtypes are declared explicitly -- without them,
         64-bit handles get truncated to 32-bit ints by ctypes defaults.
         """
         user32 = ctypes.windll.user32
@@ -488,7 +525,7 @@ class InputController:
         kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
         kernel32.GlobalFree.restype = wintypes.HGLOBAL
 
-        # Retry OpenClipboard — another process may briefly hold it.
+        # Retry OpenClipboard -- another process may briefly hold it.
         opened = False
         for _ in range(20):
             if user32.OpenClipboard(None):
@@ -526,7 +563,7 @@ class InputController:
             if not user32.SetClipboardData(_CF_UNICODETEXT, h_mem):
                 kernel32.GlobalFree(h_mem)
                 raise OSError("SetClipboardData failed")
-            # Success — clipboard owns h_mem now; do NOT free it.
+            # Success -- clipboard owns h_mem now; do NOT free it.
         finally:
             user32.CloseClipboard()
 
@@ -598,37 +635,37 @@ class InputController:
 
     # -- screen ------------------------------------------------------------
     async def screen_size(self) -> tuple[int, int]:
+        """Return the full virtual desktop size (all monitors)."""
         self._require()
-        return (
-            self._user32.GetSystemMetrics(0),
-            self._user32.GetSystemMetrics(1),
-        )
+        _, _, virt_w, virt_h = self._virtual_screen()
+        return (virt_w, virt_h)
 
     async def position(self) -> tuple[int, int]:
         self._require()
         point = wintypes.POINT()
         self._user32.GetCursorPos(ctypes.byref(point))
         return (point.x, point.y)
-    
+
     def click_sync(self, x: int, y: int, *, button: str = "left") -> None:
         """Synchronous click for worker-thread callers.
 
         Same as :meth:`click` but without the async wrapping. Safe to call
         from threads that don't have a running event loop (e.g. the UIA
-        worker thread).
+        worker thread).  Uses virtual desktop metrics for multi-monitor
+        correctness.
         """
         self._require()
         if button not in {"left", "right", "middle"}:
             raise AutomationError(f"unsupported mouse button: {button}")
-        screen_w = self._user32.GetSystemMetrics(0)
-        screen_h = self._user32.GetSystemMetrics(1)
-        if screen_w <= 1 or screen_h <= 1:
+        virt_x, virt_y, virt_w, virt_h = self._virtual_screen()
+        if virt_w <= 1 or virt_h <= 1:
             raise AutomationError("could not determine screen size")
-        ax = int(x * 65535 / (screen_w - 1))
-        ay = int(y * 65535 / (screen_h - 1))
+        ax = int((x - virt_x) * 65535 / (virt_w - 1))
+        ay = int((y - virt_y) * 65535 / (virt_h - 1))
         self._send(
             self._mouse_input(
-                _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE, ax, ay
+                _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE | _MOUSEEVENTF_VIRTUALDESK,
+                ax, ay,
             )
         )
         down, up = {

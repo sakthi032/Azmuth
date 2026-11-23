@@ -136,4 +136,233 @@ async def ground_target(
         return None
 
 
-__all__ = ["VlmTarget", "ground_target"]
+async def describe_image(
+    image_bytes: bytes,
+    prompt: str,
+    *,
+    timeout: float = 60.0,
+) -> str:
+    """Ask the VLM a free-form question about an image.
+
+    Returns the raw text answer, or "" if the call fails or the model
+    produced nothing. Never raises; callers treat "" as unavailable.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        logger.warning(
+            "GEMINI_API_KEY not set — describe_image unavailable",
+            extra={"event": "VLM_DESCRIBE_NO_KEY"},
+        )
+        return ""
+
+    model = os.getenv("VISION_MODEL", "gemini-2.5-flash")
+    base = os.getenv(
+        "GEMINI_BASE_URL",
+        "https://generativelanguage.googleapis.com/v1beta",
+    )
+    url = f"{base}/models/{model}:generateContent?key={api_key}"
+
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/png", "data": b64}},
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 2048,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(url, json=payload)
+            if r.status_code >= 400:
+                logger.warning(
+                    "vlm describe failed",
+                    extra={
+                        "event": "VLM_DESCRIBE_FAILED",
+                        "status": r.status_code,
+                    },
+                )
+                return ""
+            data = r.json()
+    except Exception:
+        logger.exception("vlm describe request failed")
+        return ""
+
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return ""
+
+
+async def describe_image_detailed(
+    image_bytes: bytes,
+    prompt: str,
+    *,
+    timeout: float = 60.0,
+    mime_type: str = "image/png",
+) -> tuple[str, str]:
+    """Like describe_image, but returns ``(answer, error_reason)``.
+
+    ``error_reason`` is ``""`` on success. On failure it is a
+    human-readable string the tool can surface directly: missing key,
+    quota exceeded, unsupported format, too large, network error, etc.
+    ``answer`` is ``""`` on failure.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "", "GEMINI_API_KEY is not set — vision unavailable"
+
+    model = os.getenv("VISION_MODEL", "gemini-2.5-flash")
+    base = os.getenv(
+        "GEMINI_BASE_URL",
+        "https://generativelanguage.googleapis.com/v1beta",
+    )
+    url = f"{base}/models/{model}:generateContent?key={api_key}"
+
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime_type, "data": b64}},
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 2048,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(url, json=payload)
+    except httpx.TimeoutException:
+        return "", "vision API timed out — try a smaller region or retry"
+    except httpx.RequestError as exc:
+        return "", f"vision network error: {exc}"
+    except Exception as exc:
+        logger.exception("vlm describe request raised")
+        return "", f"vision request failed: {exc}"
+
+    if r.status_code in (401, 403):
+        return "", (
+            f"vision API auth failed (HTTP {r.status_code}) — check "
+            f"GEMINI_API_KEY"
+        )
+    if r.status_code == 429:
+        return "", "vision API quota exceeded — try again later"
+    if r.status_code == 413:
+        return "", "image too large for the vision API"
+    if r.status_code >= 400:
+        try:
+            detail = r.json()
+        except Exception:
+            detail = r.text[:300]
+        logger.warning(
+            "vlm describe failed",
+            extra={
+                "event": "VLM_DESCRIBE_FAILED",
+                "status": r.status_code,
+                "detail": str(detail)[:500],
+            },
+        )
+        return "", f"vision API HTTP {r.status_code}"
+
+    try:
+        data = r.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return str(text), ""
+    except (KeyError, IndexError, TypeError, ValueError):
+        return "", (
+            "vision model returned no text — the image may be blank "
+            "or the prompt was filtered"
+        )
+
+
+async def describe_image_detailed(
+    image_bytes: bytes,
+    prompt: str,
+    *,
+    timeout: float = 60.0,
+    mime_type: str = "image/jpeg",
+) -> tuple[str, str]:
+    """Like describe_image, but returns (answer, error_reason).
+
+    error_reason is "" on success. On failure it names the exact cause:
+    missing key, quota, unsupported format, too large, etc.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "", "GEMINI_API_KEY is not set — vision unavailable"
+
+    model = os.getenv("VISION_MODEL", "gemini-2.5-flash")
+    base = os.getenv(
+        "GEMINI_BASE_URL",
+        "https://generativelanguage.googleapis.com/v1beta",
+    )
+    url = f"{base}/models/{model}:generateContent?key={api_key}"
+
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime_type, "data": b64}},
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 2048,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(url, json=payload)
+    except httpx.TimeoutException:
+        return "", "vision API timed out — try a smaller region or retry"
+    except httpx.RequestError as exc:
+        return "", f"vision network error: {exc}"
+    except Exception as exc:
+        logger.exception("vlm describe request raised")
+        return "", f"vision request failed: {exc}"
+
+    if r.status_code in (401, 403):
+        return "", (
+            f"vision API auth failed (HTTP {r.status_code}) — check "
+            f"GEMINI_API_KEY"
+        )
+    if r.status_code == 429:
+        return "", "vision API quota exceeded — try again later"
+    if r.status_code == 413:
+        return "", "image too large for the vision API"
+    if r.status_code >= 400:
+        logger.warning(
+            "vlm describe failed",
+            extra={
+                "event": "VLM_DESCRIBE_FAILED",
+                "status": r.status_code,
+            },
+        )
+        return "", f"vision API HTTP {r.status_code}"
+
+    try:
+        data = r.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return str(text), ""
+    except (KeyError, IndexError, TypeError, ValueError):
+        return "", (
+            "vision model returned no text — image may be blank or "
+            "the prompt was filtered"
+        )
+
+
+__all__ = [
+    "VlmTarget", "ground_target", "describe_image",
+    "describe_image_detailed",
+]

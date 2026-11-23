@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from typing import Any
 
@@ -35,7 +36,7 @@ class AzmuthDesktopApp:
     """The tkinter shell with sidebar + main area layout."""
 
     def __init__(
-       self,
+        self,
         controller: UIController,
         *,
         title: str = "Azmuth",
@@ -43,7 +44,8 @@ class AzmuthDesktopApp:
         brain=None,
         voice: VoiceInputManager | None = None,
         tts: TTSManager | None = None,
-        event_bus=None, 
+        event_bus=None,
+        scheduler=None,
     ) -> None:
         tk, ttk, messagebox, simpledialog = _import_tkinter()
         self._tk = tk
@@ -56,10 +58,13 @@ class AzmuthDesktopApp:
         self._state: UIState = controller.state
         self._voice = voice
         self._tts = tts
-        self._event_bus = event_bus 
+        self._event_bus = event_bus
         self._always_speak = False
-        self._speech_queue = None  
+        self._speech_queue = None
         self._narrator = None
+        self._reminder_notifier = None
+        self._scheduler = scheduler
+        self._pending_attachment: str | None = None
         self._root = tk.Tk()
         self._root.title(title)
 
@@ -72,12 +77,18 @@ class AzmuthDesktopApp:
         # Cap at 1200x800, but never exceed 90% of the screen in either
         # dimension — leaves room for the taskbar and the window chrome.
         win_w = min(1200, int(screen_w * 0.90))
-        win_h = min(800,  int(screen_h * 0.90))
+        win_h = min(800, int(screen_h * 0.90))
         win_x = (screen_w - win_w) // 2
         win_y = max(0, (screen_h - win_h) // 2 - 20)  # nudge up a touch
 
         self._root.geometry(f"{win_w}x{win_h}+{win_x}+{win_y}")
         self._root.minsize(700, 480)
+
+        # Route UIState listener callbacks onto the Tk thread.
+        try:
+            self._state.set_dispatcher(lambda fn: self._root.after(0, fn))
+        except Exception:
+            logger.exception("could not install UIState dispatcher")
 
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
@@ -109,11 +120,7 @@ class AzmuthDesktopApp:
             self._speech_queue = SpeechQueue(self._tts)
 
             # Schedule start() on the loop; safe now because run_forever()
-            # has been called for ~50ms.
-            future = asyncio.run_coroutine_threadsafe(
-                self._speech_queue.start(), self._loop
-            )
-            # Schedule start() but do NOT block waiting for it.
+            # has been called for ~50ms. Do NOT block waiting for it.
             asyncio.run_coroutine_threadsafe(
                 self._speech_queue.start(), self._loop
             )
@@ -192,6 +199,9 @@ class AzmuthDesktopApp:
             on_listen=self._handle_listen,
             on_clear=self._handle_clear,
             on_cancel_tasks=self._handle_cancel_tasks,
+            on_stop=self._handle_stop,
+            on_attach=self._handle_attach,
+            on_ask_screen=self._handle_ask_screen,
         )
         self._input_row.grid(row=2, column=0, sticky="ew")
 
@@ -201,26 +211,199 @@ class AzmuthDesktopApp:
             "Azmuth is running. Type a message, or click Login as Creator "
             "to unlock advanced automation.")
 
+        # Reminder delivery: chat + toast + optional TTS on REMINDER_DUE.
+        # Uses a lazy getter for the speech queue so it works whether or
+        # not TTS is enabled.
+        if self._event_bus is not None:
+            try:
+                from app.tasks.reminder_notifier import install_reminder_notifier
+
+                self._reminder_notifier = install_reminder_notifier(
+                    event_bus=self._event_bus,
+                    ui_state=self._state,
+                    speech_queue_getter=lambda: self._speech_queue,
+                )
+            except Exception:
+                logger.exception("reminder notifier install failed")
+                self._reminder_notifier = None
+
+        if self._scheduler is not None:
+            self._root.after(100, self._start_reminder_scheduler)
+
+    def _start_reminder_scheduler(self) -> None:
+        if self._scheduler is None:
+            return
+        try:
+            async def _noop_executor(
+                prompt: str, agent: str, task_id: str
+            ) -> None:
+                return None
+
+            self._scheduler.start(
+                executor=_noop_executor, loop=self._loop
+            )
+            logger.info(
+                "reminder scheduler started on UI loop",
+                extra={"event": "SCHEDULER_STARTED"},
+            )
+        except Exception:
+            logger.exception("reminder scheduler start failed")
+
     # ── Handlers ───────────────────────────────────────────────────────
     def _handle_send(self, text: str) -> None:
-        self._submit(self._do_send_and_speak(text))
+        if not text.strip() and not self._pending_attachment:
+            return
+        attachment = self._pending_attachment
+        self._pending_attachment = None
+        hint: str | None = None
+        if attachment:
+            hint = (
+                f"[User attached file: {attachment}]\n"
+                f"Use read_document or ask_document on this path."
+            )
+            if not text.strip():
+                text = "Summarize this file"
+        self._submit(self._do_send_and_speak(text, llm_hint=hint))
 
-    async def _do_send_and_speak(self, text: str) -> None:
+    def _handle_attach(self) -> None:
+        """Open a file picker, allow the chosen file for this session,
+        and pre-fill the entry with a 'read <name>' prompt."""
+        try:
+            from tkinter import filedialog
+        except ImportError:
+            self._state.add_system_message(
+                "File picker is not available in this Python build.",
+                level="warning",
+            )
+            return
+
+        path = filedialog.askopenfilename(
+            parent=self._root,
+            title="Attach a file to Azmuth",
+            filetypes=[
+                (
+                    "All supported",
+                    "*.pdf *.docx *.xlsx *.csv *.txt *.md *.py *.js "
+                    "*.ts *.tsx *.jsx *.java *.c *.cpp *.h *.rs *.go "
+                    "*.rb *.php *.swift *.kt *.lua *.sh *.ps1 *.sql "
+                    "*.json *.yaml *.yml *.toml *.ini *.xml *.html "
+                    "*.css *.log *.png *.jpg *.jpeg *.webp *.bmp *.gif",
+                ),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+
+        try:
+            from app.documents.session_files import get_registry
+            registry = get_registry()
+            resolved = registry.allow(path)
+        except Exception:
+            logger.exception("could not register attached file")
+            self._state.add_system_message(
+                "Could not attach the selected file.",
+                level="error",
+            )
+            return
+
+        self._pending_attachment = str(resolved)
+        name = resolved.name
+        self._state.add_system_message(
+            f"\U0001F4CE Attached: {name}"
+        )
+        try:
+            self._input_row.focus_entry()
+        except Exception:
+            pass
+
+    def _handle_ask_screen(self) -> None:
+        """Prompt for a question about the screen, then submit it."""
+        question = self._simpledialog.askstring(
+            "Ask about my screen",
+            "What would you like to know about your screen?",
+            initialvalue="What's on my screen right now?",
+            parent=self._root,
+        )
+        if not question or not question.strip():
+            return
+        hint = '[Use describe_screen with region="active_window".]'
+        self._input_row.set_text("")
+        # 3-second countdown so the user can arrange windows
+        async def _countdown_then_send() -> None:
+            for n in (3, 2, 1):
+                self._state.add_system_message(
+                    f"\U0001F5A5 Capturing screen in {n}\u2026"
+                )
+                await asyncio.sleep(1.0)
+            await self._do_send_and_speak(question.strip(), llm_hint=hint)
+        self._submit(_countdown_then_send())
+
+    def _handle_stop(self) -> None:
+       # Reset UI IMMEDIATELY. Do not wait for the worker.
+        try:
+            self._input_row.set_streaming(False)
+        except Exception:
+            pass
+        self._state.add_system_message("\u23f9 Stopped")
+
+        # Cancel the in-flight task on the loop thread.
+        try:
+            self._loop.call_soon_threadsafe(
+                self._controller.cancel_in_flight
+            )
+        except Exception:
+            logger.exception("cancel_in_flight scheduling failed")
+
+        # Cancel pending TTS for this turn.
+        if self._speech_queue is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._speech_queue.cancel_pending(), self._loop
+                )
+            except Exception:
+                logger.exception("cancel_pending TTS failed")
+
+    async def _do_send_and_speak(
+        self, text: str, *, llm_hint: str | None = None
+    ) -> None:
         if self._speech_queue is not None:
             await self._speech_queue.cancel_pending()
 
-        reply = await self._controller.send_text(text)
+        try:
+            self._input_row.set_streaming(True)
+        except Exception:
+            pass
+
+        try:
+             try:
+                 reply = await self._controller.send_text(
+                     text, llm_hint=llm_hint
+                 )
+             except asyncio.CancelledError:
+                 logger.info(
+                     "turn cancelled by Stop",
+                     extra={"event": "UI_TURN_CANCELLED"},
+                 )
+                 return
+        finally:
+            try:
+                self._input_row.set_streaming(False)
+            except Exception:
+                pass
 
         if reply and self._always_speak:
             spoken = self._controller.last_spoken_text or reply
+            sentences = _split_sentences(spoken)
             if self._speech_queue is not None:
-                await self._speech_queue.enqueue(spoken)
+                for sentence in sentences:
+                    await self._speech_queue.enqueue(sentence)
             elif self._tts is not None:
-                asyncio.create_task(
-                    self._tts.speak_response(spoken),
-                    name="tts_speak",
-                )
-
+                for sentence in sentences:
+                    asyncio.create_task(
+                        self._tts.speak_response(sentence),
+                        name="tts_speak",
+                    )
 
     def _handle_listen(self) -> None:
         if self._voice is None:
@@ -295,6 +478,9 @@ class AzmuthDesktopApp:
             self._authenticator.logout()
             self._state.set_mode("restricted", user_id=None)
             self._sidebar.set_logged_in(False)
+            # Isolate principals: reset the in-memory session so the
+            # next turn cannot see the creator's conversation history.
+            self._controller.reset_conversation()
             self._state.add_system_message("Logged out. Mode: RESTRICTED.")
             return
 
@@ -311,6 +497,8 @@ class AzmuthDesktopApp:
                 "Login failed", str(exc), parent=self._root)
             return
 
+        # Reset the anonymous session so creator mode starts fresh.
+        self._controller.reset_conversation()
         self._state.set_mode(principal.mode.value, user_id=principal.user_id)
         self._sidebar.set_logged_in(True)
         self._state.add_system_message(
@@ -349,7 +537,21 @@ class AzmuthDesktopApp:
 
     # ── Thread bridging ────────────────────────────────────────────────
     def _submit(self, coro) -> None:
-        asyncio.run_coroutine_threadsafe(coro, self._loop)
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+        def _log_failure(f):
+            try:
+                exc = f.exception()
+            except (asyncio.CancelledError, Exception):
+                return
+            if exc is not None:
+                logger.exception(
+                    "UI coroutine raised",
+                    exc_info=exc,
+                    extra={"event": "UI_COROUTINE_RAISED"},
+                )
+
+        fut.add_done_callback(_log_failure)
 
     def _post_to_ui(self, callback, *args: Any) -> None:
         try:
@@ -366,6 +568,16 @@ class AzmuthDesktopApp:
 
     # ── Shutdown ───────────────────────────────────────────────────────
     def _on_close(self) -> None:
+        if self._reminder_notifier is not None:
+            try:
+                self._reminder_notifier.detach()
+            except Exception:
+                pass
+        if self._scheduler is not None:
+            try:
+                self._scheduler.stop()
+            except Exception:
+                logger.exception("scheduler stop failed")
         if self._narrator is not None:
             try:
                 self._narrator.unsubscribe()
@@ -387,6 +599,27 @@ class AzmuthDesktopApp:
         except Exception:
             pass
         self._root.destroy()
+
+
+# ── Sentence splitter (module level, used by _do_send_and_speak) ──────
+_SENTENCE_END = re.compile(r"[.!?](?:\s|$)")
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split ``text`` into sentence-ish chunks for sentence-by-sentence TTS."""
+    if not text:
+        return []
+    parts: list[str] = []
+    start = 0
+    for m in _SENTENCE_END.finditer(text):
+        piece = text[start:m.end()].strip()
+        if piece:
+            parts.append(piece)
+        start = m.end()
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts or [text.strip()]
 
 
 def build_app(

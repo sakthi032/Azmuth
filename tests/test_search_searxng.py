@@ -53,7 +53,7 @@ async def test_403_raises_actionable_error():
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as get:
         get.return_value = MagicMock(status_code=403)
 
-        with pytest.raises(ProviderError, match="JSON format"):
+        with pytest.raises(ProviderError, match=r"enable 'json'|JSON format"):
             await provider.search(SearchQuery(text="x"))
 
 
@@ -67,4 +67,4 @@ async def test_empty_results_is_not_an_exception():
         get.return_value = resp
 
         out = await provider.search(SearchQuery(text="obscure"))
-        assert out.results == []
+        assert list(out.results) == []

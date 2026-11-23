@@ -217,6 +217,37 @@ class WindowController:
         return {"handle": info.handle, "title": info.title, "state": state}
 
 
+def wait_for_window(title_needle: str, timeout: float = 10.0) -> "WindowInfo":
+    """Poll list_windows until a window matching title_needle appears or timeout.
+
+    Returns the first matching WindowInfo.
+    Raises AutomationError if no match within timeout seconds.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    needle_lower = title_needle.lower()
+    while time.monotonic() < deadline:
+        matches = [w for w in list_windows() if needle_lower in w.title.lower()]
+        if matches:
+            logger.info(
+                "wait_for_window matched",
+                extra={
+                    "event": "APP_WINDOW_READY",
+                    "needle": title_needle,
+                    "title": matches[0].title,
+                    "handle": matches[0].handle,
+                },
+            )
+            return matches[0]
+        time.sleep(0.3)
+    visible = ", ".join(repr(w.title) for w in list_windows()[:10])
+    raise AutomationError(
+        f"wait_for_window timed out after {timeout}s: "
+        f"no window matched {title_needle!r}. Visible windows: {visible}"
+    )
+
+
 __all__ = [
     "WindowController",
     "WindowInfo",
@@ -225,4 +256,5 @@ __all__ = [
     "list_windows",
     "set_window_state",
     "set_window_state_by_title",
+    "wait_for_window",
 ]

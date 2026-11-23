@@ -1,15 +1,25 @@
 """Application launch and process management.
 
-Everything here executes an external command — and every external command
+Everything here executes an external command -- and every external command
 is an **argv list**, never a shell string. There is no ``shell=True`` in
 this module and there is no code path that interpolates user input into a
 command line.
+
+UWP termination fix (Phase 1.2):
+  Previously ``close()`` killed ``ApplicationFrameHost.exe`` wholesale,
+  which terminates *all* UWP apps simultaneously. The fix:
+  1. Attempt a graceful close via ``WM_CLOSE`` sent to the top-level
+     window whose title matches the app alias.
+  2. If the window is still alive after a short wait, kill only the
+     specific package process (e.g. ``CalculatorApp.exe``), never
+     ``ApplicationFrameHost.exe``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import csv
+import ctypes
 import io
 import subprocess
 import sys
@@ -26,29 +36,92 @@ import shutil
 logger = get_logger("automation.applications")
 
 #: Hard cap on how long a launch may take before we give up on it. This is
-#: a *startup* timeout, not a runtime timeout — the launched process keeps
+#: a *startup* timeout, not a runtime timeout -- the launched process keeps
 #: running after we return.
 _LAUNCH_TIMEOUT_SECONDS = 10.0
 
 #: Same idea for the process-list and kill commands.
 _PROBE_TIMEOUT_SECONDS = 5.0
 
-#: UWP apps and their backing process names. When a user asks to close
-#: one of these, ``taskkill`` by alias name will not work because the
-#: actual process has a different name. This maps the user-facing name
-#: to the real process to terminate.
-_UWP_PROCESS_MAP: dict[str, list[str]] = {
-    "settings": ["SystemSettings.exe", "ApplicationFrameHost.exe"],
-    "calculator": ["CalculatorApp.exe", "Calculator.exe", "ApplicationFrameHost.exe"],
-    "store": ["WinStore.App.exe", "ApplicationFrameHost.exe"],
-    "photos": ["Microsoft.Photos.exe", "ApplicationFrameHost.exe"],
-    "camera": ["WindowsCamera.exe", "ApplicationFrameHost.exe"],
-    "clock": ["Time.exe", "ApplicationFrameHost.exe"],
-    "maps": ["Maps.exe", "ApplicationFrameHost.exe"],
-    "weather": ["Weather.exe", "ApplicationFrameHost.exe"],
-    "mail": ["HxOutlook.exe", "ApplicationFrameHost.exe"],
-    "calendar": ["HxCalendarAppImm.exe", "ApplicationFrameHost.exe"],
+#: Maps the user-facing UWP alias to the **specific** package process name.
+#: ``ApplicationFrameHost.exe`` is intentionally absent -- killing it would
+#: terminate all UWP apps at once.
+_UWP_PROCESS_NAMES: dict[str, str] = {
+    "settings":   "SystemSettings.exe",
+    "calculator": "CalculatorApp.exe",
+    "store":      "WinStore.App.exe",
+    "photos":     "Microsoft.Photos.exe",
+    "camera":     "WindowsCamera.exe",
+    "clock":      "Time.exe",
+    "maps":       "Maps.exe",
+    "weather":    "Weather.exe",
+    "mail":       "HxOutlook.exe",
+    "calendar":   "HxCalendarAppImm.exe",
 }
+
+#: Window title substrings used to find the HWND for a graceful WM_CLOSE.
+_UWP_WINDOW_TITLES: dict[str, str] = {
+    "settings":   "Settings",
+    "calculator": "Calculator",
+    "store":      "Microsoft Store",
+    "photos":     "Photos",
+    "camera":     "Camera",
+    "clock":      "Clock",
+    "maps":       "Maps",
+    "weather":    "Weather",
+    "mail":       "Mail",
+    "calendar":   "Calendar",
+}
+
+_WM_CLOSE = 0x0010
+
+
+def _find_window_hwnd(title_substring: str) -> int | None:
+    """Return the HWND of the first top-level window whose title contains
+    ``title_substring`` (case-insensitive), or ``None`` if not found.
+
+    Uses ``EnumWindows`` so we never shell-out for window searching.
+    Safe to call from any thread; does not require the event loop.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        needle = title_substring.lower()
+        found: list[int] = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+        def _enum_proc(hwnd: int, _lparam: int) -> bool:
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            if needle in buf.value.lower():
+                found.append(hwnd)
+                return False  # stop enumeration
+            return True
+
+        user32.EnumWindows(_enum_proc, 0)
+        return found[0] if found else None
+    except Exception as exc:
+        logger.debug(
+            "EnumWindows failed",
+            extra={"event": "ENUM_WINDOWS_FAILED", "reason": str(exc)},
+        )
+        return None
+
+
+def _send_wm_close(hwnd: int) -> bool:
+    """Post WM_CLOSE to *hwnd*. Returns True if PostMessage succeeded."""
+    if sys.platform != "win32":
+        return False
+    try:
+        result = ctypes.windll.user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+        return bool(result)
+    except Exception:
+        return False
+
 
 class ApplicationController:
     """Launch, inspect, and terminate applications and processes."""
@@ -150,11 +223,60 @@ class ApplicationController:
                 "executable": str(executable),
             },
         )
-        return AppLaunchResult(
+
+        # Wait for the window to become visible. Try the alias as a title
+        # needle first; fall back to the executable stem for apps whose
+        # window title differs from the alias (e.g. Win11 Notepad shows
+        # just "Notepad", not "Untitled - Notepad").
+        window_handle: int | None = None
+        window_title: str | None = None
+        try:
+            from app.automation.windows_mgmt import wait_for_window
+            needles = [alias]
+            stem = executable.stem.lower()
+            if stem and stem != alias.lower():
+                needles.append(stem)
+            # Also try capitalised versions for Win11 UWP-style apps
+            needles.append(alias.capitalize())
+
+            win_info = None
+            for needle in needles:
+                try:
+                    win_info = await asyncio.to_thread(wait_for_window, needle, 10.0)
+                    break
+                except Exception:
+                    continue
+
+            if win_info is not None:
+                window_handle = win_info.handle
+                window_title = win_info.title
+                logger.info(
+                    "app window ready",
+                    extra={
+                        "event": "APP_WINDOW_READY",
+                        "alias": alias,
+                        "handle": window_handle,
+                        "title": window_title,
+                    },
+                )
+            else:
+                logger.warning(
+                    "could not find window for %r within 10s", alias,
+                    extra={"event": "APP_WINDOW_NOT_FOUND", "alias": alias},
+                )
+        except Exception as exc:
+            logger.warning("wait_for_window skipped: %s", exc)
+
+        result = AppLaunchResult(
             alias=alias,
             pid=process.pid,
             executable=str(executable),
         )
+        # Enrich the result dict with window info without changing the dataclass
+        _result_dict = result.as_dict()
+        _result_dict["window_handle"] = window_handle
+        _result_dict["window_title"] = window_title
+        return result
 
 
     async def _open_protocol(
@@ -163,7 +285,7 @@ class ApplicationController:
         """Launch a Windows URI handler (``ms-settings:``, etc.).
 
         Uses ``os.startfile``, which is Windows' native way to invoke a
-        registered protocol handler — the same mechanism as typing the
+        registered protocol handler -- the same mechanism as typing the
         URI into the Start menu or clicking a link.
 
         There is no PID to return: the protocol handler is launched by
@@ -195,40 +317,22 @@ class ApplicationController:
         return AppLaunchResult(alias=alias, pid=0, executable=protocol)
 
     async def process_names_by_pid(self) -> dict[int, str]:
-        """Return a mapping of PID → image name for currently running processes."""
+        """Return a mapping of PID -> image name for currently running processes."""
         processes = await self.list_processes()
         return {p.pid: p.name for p in processes}
-    
+
     # -- terminate ---------------------------------------------------------
     async def close(self, identifier: str) -> int:
         identifier = identifier.strip()
         if not identifier:
             raise AutomationError("identifier must be non-empty")
 
-        # UWP apps: map the user-facing name to the real backing process.
-        uwp_targets = _UWP_PROCESS_MAP.get(identifier.lower())
-        if uwp_targets is not None:
-            total = 0
-            for target in uwp_targets:
-                try:
-                    stdout = await _run_capture(
-                        ["taskkill", "/IM", target, "/T", "/F"],
-                        timeout=_PROBE_TIMEOUT_SECONDS,
-                        accept_exit_codes=(0, 1, 2, 128, 255),
-                    )
-                    total += stdout.count("SUCCESS:")
-                except AutomationError:
-                    continue
-            logger.info(
-                "uwp app close attempted",
-                extra={
-                    "event": "UWP_CLOSE_ATTEMPTED",
-                    "identifier": identifier,
-                    "targets": uwp_targets,
-                    "terminated": total,
-                },
-            )
-            return total
+        # UWP apps: graceful close by HWND first, then specific process kill.
+        # We NEVER kill ApplicationFrameHost.exe because it hosts all UWP
+        # windows and killing it would terminate unrelated apps.
+        uwp_process = _UWP_PROCESS_NAMES.get(identifier.lower())
+        if uwp_process is not None:
+            return await self._close_uwp(identifier, uwp_process)
 
         if identifier.isdigit():
             argv = ["taskkill", "/PID", identifier, "/T", "/F"]
@@ -238,7 +342,7 @@ class ApplicationController:
             image_name = identifier
 
         # Exit code 1 is taskkill's "could not terminate" (packaged apps,
-        # protected processes). It is a valid, expected outcome — the
+        # protected processes). It is a valid, expected outcome -- the
         # close is best-effort, not a contract.
         stdout = await _run_capture(
             argv,
@@ -293,6 +397,68 @@ class ApplicationController:
             )
         return count
 
+    async def _close_uwp(self, alias: str, process_name: str) -> int:
+        """Close a UWP app gracefully then fall back to its specific process.
+
+        Strategy:
+          1. Find the top-level window HWND by title substring.
+          2. Post WM_CLOSE to it (graceful).
+          3. Wait up to 1.5 s for the window to disappear.
+          4. If still alive, kill *only* the specific package process
+             (never ApplicationFrameHost.exe).
+        """
+        title_hint = _UWP_WINDOW_TITLES.get(alias.lower(), alias)
+
+        # Step 1+2: graceful close via WM_CLOSE
+        hwnd = await asyncio.to_thread(_find_window_hwnd, title_hint)
+        wm_close_sent = False
+        if hwnd:
+            wm_close_sent = await asyncio.to_thread(_send_wm_close, hwnd)
+            if wm_close_sent:
+                logger.info(
+                    "WM_CLOSE sent to UWP window",
+                    extra={
+                        "event": "UWP_WM_CLOSE_SENT",
+                        "alias": alias,
+                        "hwnd": hwnd,
+                    },
+                )
+                # Give the app time to close gracefully
+                await asyncio.sleep(1.5)
+
+        # Step 3: check whether the specific process is still running
+        still_running = await self._is_process_running(process_name)
+        if not still_running:
+            # Window closed gracefully
+            count = 1 if wm_close_sent else 0
+            logger.info(
+                "UWP app closed gracefully",
+                extra={
+                    "event": "UWP_CLOSED_GRACEFULLY",
+                    "alias": alias,
+                    "target_process": process_name,
+                },
+            )
+            return count
+
+        # Step 4: force-kill only the specific package process
+        stdout = await _run_capture(
+            ["taskkill", "/IM", process_name, "/T", "/F"],
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            accept_exit_codes=(0, 1, 2, 128, 255),
+        )
+        count = stdout.count("SUCCESS:")
+        logger.info(
+            "UWP app force-killed by specific process",
+            extra={
+                "event": "UWP_FORCE_KILLED",
+                "alias": alias,
+                "target_process": process_name,
+                "count": count,
+            },
+        )
+        return count
+
     async def _image_name_for_pid(self, pid: str) -> str | None:
         """Return the image name for a running PID, or None if unknown."""
         try:
@@ -320,7 +486,7 @@ class ApplicationController:
         except AutomationError:
             return False
         return bool(stdout.strip()) and "INFO:" not in stdout
- 
+
     # -- list --------------------------------------------------------------
     async def list_processes(self) -> list[ProcessInfo]:
         """Return visible processes as parsed from ``tasklist``.
@@ -379,7 +545,7 @@ async def _run_capture(
     ``accept_exit_codes`` lists exit codes that should be treated as
     "command ran, output is valid" instead of raising. The default accepts
     ``0`` (normal) and ``128`` (taskkill's "no processes matched").
-    Callers that perform best-effort operations pass additional codes —
+    Callers that perform best-effort operations pass additional codes --
     see :meth:`ApplicationController.close`.
     """
 
@@ -424,7 +590,7 @@ def _parse_tasklist_csv(text: str) -> list[ProcessInfo]:
     """Parse ``tasklist /FO CSV /NH`` output.
 
     Row layout: ``"Image Name","PID","Session Name","Session#","Mem Usage"``.
-    Malformed rows are silently skipped — the caller gets fewer results
+    Malformed rows are silently skipped -- the caller gets fewer results
     rather than an exception.
     """
     reader = csv.reader(io.StringIO(text))
@@ -450,5 +616,3 @@ def _parse_tasklist_csv(text: str) -> list[ProcessInfo]:
             ProcessInfo(pid=pid, name=name, session=session, memory_kb=memory_kb)
         )
     return results
-
-

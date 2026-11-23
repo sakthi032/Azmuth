@@ -64,7 +64,10 @@ async def capture_full_screen(save_to: Path | None = None) -> CaptureResult:
 
     def _do() -> CaptureResult:
         from PIL import ImageGrab
-        img = ImageGrab.grab(all_screens=True)
+        try:
+            img = ImageGrab.grab(all_screens=True)
+        except Exception as exc:
+            raise ProviderUnavailableError(f"screenshot capture unavailable: {exc}") from exc
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=False)
         png = buf.getvalue()

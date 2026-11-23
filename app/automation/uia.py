@@ -87,7 +87,7 @@ class ElementInfo:
     window_handle: int = 0
     depth: int = 0
     value: str = ""
-
+    is_password: bool = False
     @property
     def is_interactive(self) -> bool:
         t = self.control_type.lower()
@@ -294,6 +294,49 @@ class UIAutomationController:
 
         return await asyncio.to_thread(_read)
 
+    async def password_field_rects(
+        self,
+    ) -> list[tuple[int, int, int, int]]:
+        """Return screen-coord rects of UIA password fields in the
+        foreground window.
+
+        Returns ``[(left, top, right, bottom), …]``. Empty list if the
+        foreground window has no password fields or UIA can't read it.
+        Never raises — best-effort enumeration.
+        """
+        import asyncio
+
+        @_requires_com
+        def _collect() -> list[tuple[int, int, int, int]]:
+            uia = _load_uia()
+            root = uia.GetForegroundControl()
+            if root is None:
+                return []
+            rects: list[tuple[int, int, int, int]] = []
+            try:
+                for ctrl, _depth in uia.WalkControl(
+                    root, maxDepth=self._max_depth
+                ):
+                    try:
+                        if not bool(getattr(ctrl, "IsPassword", False)):
+                            continue
+                        r = ctrl.BoundingRectangle
+                        if r and r.right > r.left and r.bottom > r.top:
+                            rects.append((
+                                int(r.left), int(r.top),
+                                int(r.right), int(r.bottom),
+                            ))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return rects
+
+        try:
+            return await asyncio.to_thread(_collect)
+        except Exception:
+            return []
+
     # -- internal helpers --------------------------------------------------
     @staticmethod
     def _find_top_window(uia, title_substring: str):
@@ -372,6 +415,13 @@ class UIAutomationController:
         except Exception:
             pass
 
+        is_pw = False
+        try:
+            is_pw = bool(getattr(ctrl, "IsPassword", False))
+        except Exception:
+            pass
+        
+        
         return ElementInfo(
             name=name,
             control_type=ctype,
@@ -384,6 +434,7 @@ class UIAutomationController:
             window_handle=handle,
             depth=depth,
             value=value,
+            is_password=is_pw,
         )
     # -- discovery ---------------------------------------------------------
     async def find_elements(

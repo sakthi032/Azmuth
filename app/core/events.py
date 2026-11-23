@@ -55,6 +55,8 @@ class EventName(str, Enum):
     MODE_CHANGED = "MODE_CHANGED"
 
     SYSTEM_ERROR = "SYSTEM_ERROR"
+    REMINDER_FIRED = "REMINDER_FIRED"
+    REMINDER_DUE = "REMINDER_DUE"
 
 
 @dataclass(frozen=True, slots=True)

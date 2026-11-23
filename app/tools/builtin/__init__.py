@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.automation.resolver import TargetResolver
+from app.tools.builtin.composite import TypeIntoAppTool
 from app.tools.builtin.visual import ClickVisualTool
 from app.automation.base import WindowsAutomation
 from app.automation.browsers import installed_profiles
@@ -11,6 +14,7 @@ from app.automation.input import InputController
 from app.automation.settings import SettingsController
 from app.automation.uia import UIAutomationController
 from app.search.manager import SearchManager
+from app.tasks.persistent_scheduler import PersistentScheduler
 from app.tools.base import Tool
 from app.tools.builtin.browser_tools import build_browser_tools
 from app.tools.builtin.chrome_extension_tools import build_extension_tools
@@ -26,6 +30,11 @@ from app.tools.builtin.screen_state import (
     VerifyElementTool,
 )
 from app.tools.builtin.search_web import SearchWebTool
+from app.tools.builtin.scheduler_tools import (
+    CancelScheduledTaskTool,
+    ListScheduledTasksTool,
+    ScheduleTaskTool,
+)
 from app.tools.builtin.system import (
     ClickAtTool,
     ClickElementTool,
@@ -58,6 +67,7 @@ from app.tools.builtin.files import (
     FileWriteTool,
 )
 
+_DEFAULT_SCHEDULER_DB = Path("data") / "scheduler.db"
 
 
 def build_builtin_tools(
@@ -70,6 +80,8 @@ def build_builtin_tools(
     files: FileController | None = None,
     include_browsers: bool = False,
     include_extension: bool = False,
+    data_path: Path | None = None,
+    event_bus=None,
 ) -> tuple[Tool, ...]:
     """Instantiate the tools Azmuth ships with.
 
@@ -78,8 +90,22 @@ def build_builtin_tools(
     ``include_browsers`` is True, one tool set is registered per
     Chromium browser installed. When ``include_extension`` is True,
     the extension-backed tab tools are registered too.
+
+    ``data_path`` sets the directory for the scheduler SQLite database.
+    When omitted, ``data/scheduler.db`` is used. Scheduler tools are
+    always registered.
     """
     tools: list[Tool] = [EchoTool(), GetTimeTool()]
+
+    # -- Scheduler tools — always registered; USE_BASIC_TOOLS = works in RESTRICTED mode
+    _sched_db = (data_path / "scheduler.db") if data_path is not None else _DEFAULT_SCHEDULER_DB
+    _sched_db.parent.mkdir(parents=True, exist_ok=True)
+    _scheduler = PersistentScheduler(db_path=_sched_db)
+    tools.extend([
+        ScheduleTaskTool(_scheduler),
+        ListScheduledTasksTool(_scheduler),
+        CancelScheduledTaskTool(_scheduler),
+    ])
 
     if search is not None:
         tools.append(SearchWebTool(search))
@@ -133,6 +159,9 @@ def build_builtin_tools(
         resolver = TargetResolver(uia=uia, input_ctl=input_ctl)
         verifier = Verifier(uia)
         tools.append(ClickVisualTool(resolver, input_ctl, verifier))
+
+    if automation is not None and input_ctl is not None:
+        tools.append(TypeIntoAppTool(automation, input_ctl))
         
     if files is not None:
         tools.extend([

@@ -112,11 +112,14 @@ def _run_ui(settings: Settings) -> int:
 
     # The responder is a closure so it can pass the confirmer that the
     # UI installs after the window is built.
-    async def responder(user_input, conversation_id, confirmer):
+    async def responder(
+        user_input, conversation_id, confirmer, on_delta=None
+    ):
         return await azmuth.respond_as_text(
             user_input,
             conversation_id,
             confirmer=confirmer,
+            on_delta=on_delta,
         )
 
     controller = UIController(language=language, responder=responder)
@@ -129,6 +132,7 @@ def _run_ui(settings: Settings) -> int:
             voice=azmuth.voice,
             tts=azmuth.tts,
             event_bus=azmuth.event_bus,
+            scheduler=azmuth.scheduler,
         )
         app.run()
     except RuntimeError as exc:

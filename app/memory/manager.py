@@ -163,7 +163,19 @@ class MemoryManager:
         also falls back if the vector path yields nothing or raises.
         """
         if not self.supports_semantic_recall():
-            return self.search(query, user_id=user_id, kind=kind, limit=top_k)
+            hits = self.search(
+                query, user_id=user_id, kind=kind, limit=top_k,
+            )
+            if hits or not user_id:
+                return hits
+            # Generic personal queries ("what do you know about me") do not
+            # contain the stored text as a substring. Fall back to the
+            # user's most recent memories so store-then-recall works for
+            # them. ``not user_id`` above preserves isolation for anonymous
+            # callers — they get nothing rather than every user's records.
+            return self._backend.list(
+                user_id=user_id, kind=kind, limit=top_k,
+            )
 
         try:
             vector = self._embeddings.embed(query)
@@ -386,6 +398,7 @@ def _build_vectors(settings: Settings) -> VectorStore | None:
 def build_memory_manager(
     settings: Settings,
     *,
+    backend: MemoryBackend | None = None,
     embeddings: EmbeddingProvider | None = None,
     vectors: VectorStore | None = None,
 ) -> MemoryManager:
@@ -401,42 +414,43 @@ def build_memory_manager(
     supplied. Both default to null (disabled) so the app works without
     a real embedding model installed.
     """
-    backend_name = (settings.memory_backend or "sqlite").lower()
+    if backend is None:
+        backend_name = (settings.memory_backend or "sqlite").lower()
 
-    if backend_name == "postgres":
-        from app.memory.backends.postgres_backend import PostgresMemoryBackend
+        if backend_name == "postgres":
+            from app.memory.backends.postgres_backend import PostgresMemoryBackend
 
-        backend: MemoryBackend = PostgresMemoryBackend(
-            host=settings.postgres_host,
-            port=settings.postgres_port,
-            database=settings.postgres_database,
-            user=settings.postgres_user,
-            password=settings.postgres_password,
-            schema=settings.postgres_schema,
-        )
-        logger.info(
-            "memory backend initialised",
-            extra={
-                "event": "MEMORY_BACKEND_READY",
-                "backend": "postgres",
-                "database": settings.postgres_database,
-            },
-        )
-    elif backend_name == "sqlite":
-        backend = SqliteMemoryBackend(settings.memory_database)
-        logger.info(
-            "memory backend initialised",
-            extra={
-                "event": "MEMORY_BACKEND_READY",
-                "backend": "sqlite",
-                "path": str(settings.memory_database),
-            },
-        )
-    else:
-        raise MemoryStoreError(
-            f"unknown MEMORY_BACKEND {backend_name!r}. "
-            f"Supported: 'sqlite', 'postgres'."
-        )
+            backend = PostgresMemoryBackend(
+                host=settings.postgres_host,
+                port=settings.postgres_port,
+                database=settings.postgres_database,
+                user=settings.postgres_user,
+                password=settings.postgres_password,
+                schema=settings.postgres_schema,
+            )
+            logger.info(
+                "memory backend initialised",
+                extra={
+                    "event": "MEMORY_BACKEND_READY",
+                    "backend": "postgres",
+                    "database": settings.postgres_database,
+                },
+            )
+        elif backend_name == "sqlite":
+            backend = SqliteMemoryBackend(settings.memory_database)
+            logger.info(
+                "memory backend initialised",
+                extra={
+                    "event": "MEMORY_BACKEND_READY",
+                    "backend": "sqlite",
+                    "path": str(settings.memory_database),
+                },
+            )
+        else:
+            raise MemoryStoreError(
+                f"unknown MEMORY_BACKEND {backend_name!r}. "
+                f"Supported: 'sqlite', 'postgres'."
+            )
 
     # Build embeddings / vectors if caller didn't supply them.
     emb = embeddings if embeddings is not None else _build_embeddings(settings)

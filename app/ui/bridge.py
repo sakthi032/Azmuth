@@ -13,7 +13,8 @@ from app.language.manager import LanguageManager
 from app.ui.reducer import UIReducer
 from app.ui.state import LogLevel, StatusSnapshot, UIState
 from app.voice.input_manager import InputManager, UserInput
-
+import asyncio
+import inspect
 logger = get_logger("ui.bridge")
 
 
@@ -22,7 +23,7 @@ logger = get_logger("ui.bridge")
 #: or ``(reply_text, session_id, model, provider)``. Both are accepted;
 #: the extended form is what Azmuth.respond_as_text produces.
 Responder = Callable[
-    [UserInput, "str | None", "Confirmer | None"],
+    ...,
     Awaitable["tuple[Any, ...]"],
 ]
 
@@ -88,6 +89,8 @@ class UIController:
         self._busy = False
         self._conversation_id: str | None = None
         self._last_spoken_text: str = "" 
+        self._current_task: asyncio.Task | None = None
+        self._turn_id: int = 0
 
     # -- introspection -----------------------------------------------------
     @property
@@ -110,6 +113,19 @@ class UIController:
     def reset_conversation(self) -> None:
         self._conversation_id = None
 
+    def cancel_in_flight(self) -> None:
+        """Cancel the currently running turn, if any.
+
+        Bumps the turn_id so any late delta or late result from the
+        cancelled turn is dropped. Cancels the task so awaiting code
+        unwinds immediately even if the underlying HTTP call is in a
+        worker thread.
+        """
+        self._turn_id += 1
+        task = self._current_task
+        if task is not None and not task.done():
+            task.cancel()
+
     def set_confirmer(self, confirmer: Confirmer | None) -> None:
         self._confirmer = confirmer
 
@@ -121,7 +137,9 @@ class UIController:
 
     # -- user actions ------------------------------------------------------
     async def send_text(
-        self, text: str, *, session_language: str | None = None
+        self, text: str, *, session_language: str | None = None,
+        on_delta: Callable[[str], Awaitable[None] | None] | None = None,
+        llm_hint: str | None = None,
     ) -> str:
         text = text.strip()
         if not text:
@@ -134,20 +152,74 @@ class UIController:
             return ""
 
         self._busy = True
+        self._current_task = asyncio.current_task()
+        self._turn_id += 1
+        my_turn_id = self._turn_id
+        streaming_id: int | None = None
         try:
-            user_input = self._inputs.from_text(
+            display_input = self._inputs.from_text(
                 text, session_language=session_language
             )
             self._state.add_user_message(
-                user_input.text,
-                language=user_input.language,
+                display_input.text,
+                language=display_input.language,
                 source="text",
             )
 
-            try:
-                raw = await self._responder(
-                    user_input, self._conversation_id, self._confirmer
+            # LLM sees a version with the hint prepended; the
+            # transcript only shows the user's typed text.
+            if llm_hint:
+                llm_input = self._inputs.from_text(
+                    f"{llm_hint}\n\n{text}",
+                    session_language=session_language,
                 )
+            else:
+                llm_input = display_input
+
+            async def _delta(delta: str) -> None:
+                nonlocal streaming_id
+                if my_turn_id != self._turn_id:
+                    # Stale — Stop was pressed
+                    raise asyncio.CancelledError()
+                if streaming_id is None:
+                    streaming_id = self._state.begin_stream(
+                        language=display_input.language, source="text",
+                    )
+                self._state.append_stream(streaming_id, delta)
+                if on_delta is not None:
+                    try:
+                        result = on_delta(delta)
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception:
+                        logger.exception(
+                            "on_delta (UI-level) raised",
+                            extra={"event": "UI_ON_DELTA_FAILED"},
+                        )
+
+            try:
+                if on_delta is not None:
+                    try:
+                        raw = await self._responder(
+                            llm_input, self._conversation_id, self._confirmer,
+                            on_delta=_delta,
+                        )
+                    except TypeError:
+                        raw = await self._responder(
+                            llm_input, self._conversation_id, self._confirmer
+                        )
+                else:
+                    raw = await self._responder(
+                        llm_input, self._conversation_id, self._confirmer
+                    )
+            except asyncio.CancelledError:
+                if streaming_id is not None:
+                    self._state.finish_stream(streaming_id)
+                if my_turn_id == self._turn_id:
+                    # Only this turn owns the message; Stop button
+                    # already added one synchronously if it fired.
+                    self._state.add_system_message("\u23f9 Stopped")
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "responder failed",
@@ -160,22 +232,27 @@ class UIController:
                 return ""
 
             reply, session_id, model, provider, spoken_text = _unpack_result(raw)
+            if my_turn_id != self._turn_id:
+                # Stop was pressed while responder was completing — drop
+                return ""
             self._last_spoken_text = spoken_text
 
             if session_id:
                 self._conversation_id = session_id
-            if not reply:
-                return ""
-            self._state.add_assistant_message(
-                reply,
-                language=user_input.language,
-                source="text",
-                model=model,
-                provider=provider,
-            )
+            if streaming_id is not None:
+                self._state.finish_stream(streaming_id, final_text=reply)
+            elif reply:
+                self._state.add_assistant_message(
+                    reply,
+                    language=display_input.language,
+                    source="text",
+                    model=model,
+                    provider=provider,
+                )
             return reply
         finally:
             self._busy = False
+            self._current_task = None
 
     async def add_voice_input(self, user_input: UserInput) -> str:
         if self._busy:

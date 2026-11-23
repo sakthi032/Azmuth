@@ -477,8 +477,12 @@ def test_tool_call_requires_confirmation_for_creator(settings: Settings) -> None
 
 def test_tool_loop_bounded_by_max_iterations(settings: Settings) -> None:
     # LLM always emits a tool call — loop must terminate.
-    always_tool = '```tool\n{"name": "echo", "arguments": {"message": "x"}}\n```'
-    llm = ScriptedLLM([always_tool] * 20)
+    # Vary the argument to prevent LoopGuard from halting early on identical calls.
+    always_tool = [
+        f'```tool\n{{"name": "echo", "arguments": {{"message": "x_{i}"}}}}\n```'
+        for i in range(20)
+    ]
+    llm = ScriptedLLM(always_tool)
 
     perms = PermissionManager()
     tools = ToolManager(perms)

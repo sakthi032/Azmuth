@@ -14,7 +14,7 @@ argument so tests can substitute any subsystem without subclassing.
 from __future__ import annotations
 
 import asyncio
-
+from typing import Any
 from app.brain.pipeline import Brain, BrainResponse, Confirmer
 from app.config.logging_setup import get_logger
 from app.config.settings import Settings
@@ -41,7 +41,6 @@ from app.voice import (
     build_wake_word_detector,
 )
 from app.voice.input_manager import UserInput
-
 
 
 logger = get_logger("brain.azmuth")
@@ -87,6 +86,9 @@ class Azmuth:
         self._plugins = plugin_manager
         self._brain = brain
         self._started = False
+        self._scheduler: Any = None
+        self._scheduler_started: bool = False
+        self._reminder_notifier: Any = None
 
     # -- accessors ---------------------------------------------------------
     @property
@@ -149,6 +151,40 @@ class Azmuth:
     def planner(self):
         return self._brain.planner
 
+    @property
+    def scheduler(self):
+        return self._scheduler
+
+    def start_scheduler(self, loop: "asyncio.AbstractEventLoop") -> None:
+        """Start the reminder scheduler on the caller's persistent loop.
+
+        Must be called from the UI (or any long-lived event loop)
+        *after* that loop has begun running. Idempotent — a second
+        call is a no-op. Safe when no scheduler is configured.
+        """
+        if self._scheduler is None:
+            return
+        if self._scheduler_started:
+            return
+        try:
+            async def _scheduler_executor(
+                prompt: str, agent: str, task_id: str
+            ) -> None:
+                # Delivery is handled via REMINDER_DUE → ReminderNotifier.
+                return None
+
+            self._scheduler.start(
+                executor=_scheduler_executor, loop=loop
+            )
+            self._scheduler_started = True
+            logger.info(
+                "reminder scheduler started on caller loop",
+                extra={"event": "SCHEDULER_STARTED"},
+            )
+        except Exception:
+            logger.exception("reminder scheduler start failed")
+
+
     # -- pipeline ----------------------------------------------------------
     async def respond(
         self,
@@ -157,6 +193,7 @@ class Azmuth:
         conversation_id: str | None = None,
         principal: Principal | None = None,
         confirmer: Confirmer | None = None,
+        on_delta=None,
     ) -> BrainResponse:
         """Process one user turn."""
         return await self._brain.respond(
@@ -164,6 +201,7 @@ class Azmuth:
             conversation_id=conversation_id,
             principal=principal,
             confirmer=confirmer,
+            on_delta=on_delta,
         )
 
     async def respond_as_text(
@@ -173,6 +211,7 @@ class Azmuth:
         confirmer: Confirmer | None = None,
         *,
         principal: Principal | None = None,
+        on_delta=None,
     ) -> tuple[str, str, str, str, str]:
         """UI responder: returns (text, session_id, model, provider, spoken_text)."""
         if principal is None:
@@ -182,6 +221,7 @@ class Azmuth:
             conversation_id=conversation_id,
             principal=principal,
             confirmer=confirmer,
+            on_delta=on_delta,
         )
         return (
             response.text,
@@ -191,12 +231,46 @@ class Azmuth:
             response.spoken_text,
         )
 
+    def attach_reminder_delivery(
+        self,
+        *,
+        ui_queue: Any | None = None,
+        speech_queue: Any | None = None,
+    ) -> None:
+        """Install REMINDER_DUE fan-out (chat / toast / voice).
+
+        Call from the UI layer after the thread-safe queue exists.
+        Idempotent — a second call is a no-op.
+        """
+        if self._reminder_notifier is not None:
+            return
+        from app.tasks.reminder_notifier import install_reminder_notifier
+
+        self._reminder_notifier = install_reminder_notifier(
+            event_bus=self._event_bus,
+            ui_queue=ui_queue,
+            speech_queue=speech_queue,
+            channels=self._settings.reminder_channels,
+        )
+
+
     # -- lifecycle ---------------------------------------------------------
     async def startup(self) -> None:
         if self._started:
             return
         self._started = True
         await self._plugins.startup()
+
+        # Reminder scheduler start is DEFERRED. The loop created by
+        # asyncio.run(azmuth.startup()) in main.py closes right after
+        # this coroutine returns; starting the scheduler here would
+        # leave it holding a dead loop reference. The UI calls
+        # start_scheduler(app._loop) with its persistent loop instead.
+        if self._scheduler is not None:
+            logger.info(
+                "reminder scheduler created; start deferred to UI loop",
+                extra={"event": "SCHEDULER_READY"},
+            )
 
         # Start the Chrome extension bridge. Best-effort.
         try:
@@ -213,6 +287,20 @@ class Azmuth:
         logger.info("azmuth started", extra={"event": "AZMUTH_STARTED"})
 
     async def shutdown(self) -> None:
+
+        if self._scheduler is not None:
+            try:
+                self._scheduler.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("scheduler stop failed")
+                
+        if self._reminder_notifier is not None:
+            try:
+                self._reminder_notifier.detach()
+            except Exception:  # noqa: BLE001
+                logger.exception("reminder notifier detach failed")
+            self._reminder_notifier = None
+
         try:
             await self._plugins.shutdown()
         except Exception:  # noqa: BLE001
@@ -324,6 +412,20 @@ def build_azmuth(
     # ---- tools -----------------------------------------------------------
     tool_manager = tools or ToolManager(perms, event_bus=bus)
 
+    # ---- reminder scheduler ---------------------------------------------
+    from app.tasks.persistent_scheduler import PersistentScheduler
+
+    reminder_scheduler = PersistentScheduler(
+        db_path=settings.paths.data / "scheduler.db",
+        event_bus=bus,
+    )
+    try:
+        from app.tools.builtin.reminders import ScheduleReminderTool
+
+        tool_manager.register(ScheduleReminderTool(reminder_scheduler))
+    except Exception:
+        logger.exception("could not register schedule_reminder tool")
+
     # ---- plugins ---------------------------------------------------------
     plugins = plugin_manager
     if plugins is None:
@@ -359,6 +461,29 @@ def build_azmuth(
         ):
             tool_manager.register(tool)
         plugins.register_tools(tool_manager)
+
+        # ---- document tools ----------------------------------------------
+        try:
+            from app.tools.builtin.documents import (
+                AskDocumentTool, ReadDocumentTool,
+            )
+            ws_policy = perms.workspace_policy
+            tool_manager.register(ReadDocumentTool(workspace_policy=ws_policy))
+            tool_manager.register(AskDocumentTool(workspace_policy=ws_policy))
+        except Exception:
+            logger.exception("document tools registration failed")
+
+        # ---- screen understanding ---------------------------------------
+        try:
+            from app.automation.uia import UIAutomationController
+            from app.tools.builtin.screen_understanding import (
+                DescribeScreenTool,
+            )
+            tool_manager.register(
+                DescribeScreenTool(uia=UIAutomationController())
+            )
+        except Exception:
+            logger.exception("describe_screen registration failed")
 
     # ---- voice -----------------------------------------------------------
     from app.voice.sources import build_audio_source
@@ -411,25 +536,26 @@ def build_azmuth(
     )
 
     del principal
-    return Azmuth(
-        settings=settings,
-        event_bus=bus,
-        language=language_manager,
-        llm_provider=llm_provider,
-        memory=mem,
-        sessions=sess,
-        tools=tool_manager,
-        search=search_manager,
-        tts=tts_manager,
-        voice=voice_manager,
-        wake=wake_detector,
-        tasks=task_manager,
-        permissions=perms,
-        authenticator=auth,
-        plugin_manager=plugins,
-        brain=brain,
-    )
-
+    instance = Azmuth(
+         settings=settings,
+         event_bus=bus,
+         language=language_manager,
+         llm_provider=llm_provider,
+         memory=mem,
+         sessions=sess,
+         tools=tool_manager,
+         search=search_manager,
+         tts=tts_manager,
+         voice=voice_manager,
+         wake=wake_detector,
+         tasks=task_manager,
+         permissions=perms,
+         authenticator=auth,
+         plugin_manager=plugins,
+         brain=brain,
+     )
+    instance._scheduler = reminder_scheduler
+    return instance
 
 def run_azmuth_blocking(settings: Settings) -> int:  # pragma: no cover
     azmuth = build_azmuth(settings)

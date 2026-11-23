@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+import inspect
 import re
 from app.brain.prompts import build_system_prompt
 from app.brain.context import RuntimeContext
@@ -49,6 +51,7 @@ from app.tools.manager import ToolManager
 from app.voice.input_manager import UserInput
 from app.brain.planner import AutonomousPlanner, PlanStatus, StepStatus, is_planning_goal
 from app.brain.loop_guard import LoopGuard, LoopDetectedError
+from app.llm.messages import ChatRequest, ChatResponse, ModelInfo
 
 logger = get_logger("brain.pipeline")
 
@@ -171,8 +174,9 @@ class Brain:
         )
 
     @property
-    def planner(self) -> AutonomousPlanner:
-        return self._planner
+    def tools(self) -> ToolManager:
+        """Expose the tool manager for narration and diagnostics."""
+        return self._tools
 
     def set_prefer_local(self, value: bool) -> None:
         """Route every subsequent turn to the local backend.
@@ -201,6 +205,7 @@ class Brain:
         conversation_id: str | None = None,
         principal: Principal | None = None,
         confirmer: "Confirmer | None" = None,
+        on_delta: Callable[[str], Awaitable[None] | None] | None = None,
     ) -> BrainResponse:
         principal = principal or Principal.anonymous()
 
@@ -216,6 +221,16 @@ class Brain:
             language=user_input.language,
         )
 
+        
+        effective_user_id = principal.user_id or "anonymous"
+        early = await self._handle_memory_command(
+            user_input.text,
+            user_id=effective_user_id,
+            session=session,
+        )
+        if early is not None:
+            return early
+
         # ---- retrieval ---------------------------------------------------
         # Only *unconditional* retrieval remains here. Search is now a tool
         # the model calls on its own; memory recall is the one thing we do
@@ -223,13 +238,13 @@ class Brain:
         retrieval_parts: list[str] = []
         used_memory = False
 
-        if principal.user_id:
-            memory_block = self._recall_memory(
-                user_input.text, user_id=principal.user_id
-            )
-            if memory_block:
-                retrieval_parts.append(memory_block)
-                used_memory = True
+        effective_user_id = principal.user_id or "anonymous"
+        memory_block = self._recall_memory(
+            user_input.text, user_id=effective_user_id
+        )
+        if memory_block:
+            retrieval_parts.append(memory_block)
+            used_memory = True
 
         retrieval_context = (
             "\n\n".join(retrieval_parts) if retrieval_parts else None
@@ -371,6 +386,13 @@ class Brain:
                 final_text = display_text
                 session.add_assistant_message(final_text)
 
+                # Auto-extract and store personal facts from user message
+                try:
+                    from app.memory.extractor import extract_facts
+                    extract_facts(user_input.text, user_id=effective_user_id, memory=self._memory)
+                except Exception:
+                    logger.exception("fact extraction failed", extra={"event": "MEMORY_EXTRACT_FAILED"})
+
                 return BrainResponse(
                     text=final_text,
                     session_id=session.id,
@@ -405,9 +427,15 @@ class Brain:
         loop_aborted = False
         for iteration in range(1, self._max_tool_iterations + 1):
             iterations = iteration
-            response = await self._chat_with_fallback(
-                purpose, tuple(messages), tools=tool_definitions
-            )
+            if on_delta is not None:
+                response = await self._chat_stream_with_fallback(
+                    purpose, tuple(messages),
+                    tools=tool_definitions, on_delta=on_delta,
+                )
+            else:
+                response = await self._chat_with_fallback(
+                    purpose, tuple(messages), tools=tool_definitions
+                )
             last_model = response.model or last_model
             last_provider = response.provider or last_provider
 
@@ -509,7 +537,20 @@ class Brain:
         if not spoken_text:
             spoken_text = _fallback_spoken(display_text)
         final_text = display_text
+        if not final_text.strip():
+            raise ProviderUnavailableError(
+                "every LLM provider returned an empty response for this "
+                "turn. Check the LLM provider log lines (BRAIN_PROVIDER_FALLBACK, "
+                "BRAIN_EMPTY_RESPONSE) for the specific cause."
+            )
         session.add_assistant_message(final_text)
+
+        # Auto-extract and store personal facts from user message
+        try:
+            from app.memory.extractor import extract_facts
+            extract_facts(user_input.text, user_id=effective_user_id, memory=self._memory)
+        except Exception:
+            logger.exception("fact extraction failed", extra={"event": "MEMORY_EXTRACT_FAILED"})
 
         # Observe the language the model actually produced. This replaces
         # the input-side heuristic: whatever the model emitted becomes the
@@ -537,6 +578,22 @@ class Brain:
         messages: tuple[Message, ...],
         tools: tuple[ToolDefinition, ...] = (),
     ):
+        # Tool-using turns must go to a capable model, not a fast/lightweight one.
+        # FAST → CHAT when tools are present; never send tool calls to FAST tier.
+        if tools and purpose is ModelPurpose.FAST:
+            effective_purpose = ModelPurpose.CHAT
+            logger.info(
+                "upgraded purpose FAST→CHAT for tool-using turn",
+                extra={
+                    "event": "ROUTER_PURPOSE_UPGRADED",
+                    "original": "fast",
+                    "effective": "chat",
+                    "tool_count": len(tools),
+                },
+            )
+        else:
+            effective_purpose = purpose
+
         request = ChatRequest(
             messages=messages,
             temperature=self._temperature,
@@ -548,7 +605,7 @@ class Brain:
 
         last_exception: Exception | None = None
         candidates = self._llm_router.registry.by_purpose(
-            purpose, local_only=self._prefer_local
+            effective_purpose, local_only=self._prefer_local
         )
         for spec in candidates:
             try:
@@ -567,6 +624,22 @@ class Brain:
                     },
                 )
                 response = await provider.chat(request)
+                if not (response.content or "").strip() and not response.tool_calls:
+                    # An HTTP-200 response with no content and no tool calls
+                    # is not a usable turn. Treat as provider failure so the
+                    # next candidate is tried.
+                    logger.warning(
+                        "provider returned empty response",
+                        extra={
+                            "event": "BRAIN_EMPTY_RESPONSE",
+                            "model": spec.name,
+                        },
+                    )
+                    self._llm_router.record_failure(spec)
+                    last_exception = RuntimeError(
+                        f"{spec.name} returned empty content"
+                    )
+                    continue
                 self._llm_router.record_success(spec)
                 return response
             except Exception as exc:
@@ -578,6 +651,12 @@ class Brain:
                         "reason": str(exc),
                     },
                 )
+                # Also print the exception in the message so it appears in
+                # the default log line, not only in the JSON context.
+                logger.warning(
+                    "provider %s failed: %s", spec.name, exc,
+                )
+
                 # Mark it unhealthy so the next turn within the cooldown
                 # window skips straight to a working provider.
                 self._llm_router.record_failure(spec)
@@ -595,18 +674,172 @@ class Brain:
                 f"all providers failed for purpose {purpose.value!r}"
             ) from exc
 
+    async def _chat_stream_with_fallback(
+        self,
+        purpose: ModelPurpose,
+        messages: tuple[Message, ...],
+        tools: tuple[ToolDefinition, ...] = (),
+        on_delta: Callable[[str], Awaitable[None] | None] | None = None,
+    ):
+        """Stream a round. Falls back to non-streaming on any failure.
+
+        Tool-call rounds are buffered and discarded (no on_delta); text
+        rounds are buffered then replayed chunk-by-chunk through on_delta
+        so the UI sees deltas in order.
+        """
+        effective_purpose = purpose
+        if tools and purpose is ModelPurpose.FAST:
+            effective_purpose = ModelPurpose.CHAT
+
+        request = ChatRequest(
+            messages=messages,
+            temperature=self._temperature,
+            tools=tools,
+        )
+
+        if self._llm_router is None:
+            try:
+                return await self._stream_one(self._llm, request, on_delta)
+            except Exception:
+                logger.warning(
+                    "streaming failed; falling back to chat",
+                    extra={"event": "BRAIN_STREAM_FALLBACK"},
+                )
+                return await self._llm.chat(request)
+
+        last_exception: Exception | None = None
+        candidates = self._llm_router.registry.by_purpose(
+            effective_purpose, local_only=self._prefer_local
+        )
+        for spec in candidates:
+            try:
+                provider = self._llm_router.for_model(spec.name)
+            except Exception as exc:
+                last_exception = exc
+                continue
+            try:
+                response = await self._stream_one(provider, request, on_delta)
+                self._llm_router.record_success(spec)
+                return response
+            except Exception as exc:
+                logger.warning(
+                    "streaming failed for model; falling back",
+                    extra={
+                        "event": "BRAIN_STREAM_PROVIDER_FALLBACK",
+                        "failed_model": spec.name,
+                        "reason": str(exc),
+                    },
+                )
+                try:
+                    response = await provider.chat(request)
+                    self._llm_router.record_success(spec)
+                    return response
+                except Exception as exc2:
+                    self._llm_router.record_failure(spec)
+                    last_exception = exc2
+                    continue
+
+        if last_exception is not None:
+            raise ProviderUnavailableError(
+                f"all providers failed for purpose {purpose.value!r}"
+            ) from last_exception
+        raise ProviderUnavailableError(
+            f"all providers failed for purpose {purpose.value!r}"
+        )
+
+    async def _stream_one(
+        self,
+        provider: LLMProvider,
+        request: ChatRequest,
+        on_delta: Callable[[str], Awaitable[None] | None] | None,
+    ):
+        """Buffer one provider's stream. Replay through on_delta iff no
+        tool_calls were produced."""
+        buffer: list[str] = []
+        tool_calls: list[Any] = []
+        model_name = getattr(provider, "model", "") or ""
+        provider_name = getattr(provider, "name", "") or ""
+
+        async for chunk in provider.stream(request):
+            tc = getattr(chunk, "tool_calls", None)
+            if tc:
+                tool_calls.extend(tc)
+            text = (
+                getattr(chunk, "text", None)
+                or getattr(chunk, "delta", None)
+                or ""
+            )
+            if text and not tool_calls:
+                buffer.append(text)
+
+        if tool_calls:
+            try:
+                return ChatResponse(
+                    content="".join(buffer),
+                    tool_calls=tuple(tool_calls),
+                    model=model_name,
+                    provider=provider_name,
+                )
+            except TypeError:
+                # ChatResponse constructor shape differs; redo non-streaming
+                return await provider.chat(request)
+
+        # Text-only round — replay through on_delta in order
+        if on_delta is not None:
+            for piece in buffer:
+                try:
+                    result = on_delta(piece)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    logger.exception(
+                        "on_delta callback raised",
+                        extra={"event": "BRAIN_ON_DELTA_FAILED"},
+                    )
+
+        try:
+            return ChatResponse(
+                content="".join(buffer),
+                tool_calls=(),
+                model=model_name,
+                provider=provider_name,
+            )
+        except TypeError:
+            return await provider.chat(request)
+
     # -- internals ---------------------------------------------------------
     def _recall_memory(self, text: str, *, user_id: str) -> str | None:
         try:
-            records = self._memory.recall(
-                text, user_id=user_id, top_k=self._memory_top_k
-            )
+            # Use hybrid recall (BM25 + vector RRF) when setting is on
+            # and the memory manager supports it. Falls back to plain
+            # vector recall otherwise (Phase 1.4).
+            mem_settings = getattr(self, "_settings", None) or getattr(self._memory, "_settings", None)
+            use_hybrid = getattr(mem_settings, "memory_hybrid_recall", True)
+            if use_hybrid and hasattr(self._memory, "recall_hybrid"):
+                records = self._memory.recall_hybrid(
+                    text, user_id=user_id, top_k=self._memory_top_k
+                )
+            else:
+                records = self._memory.recall(
+                    text, user_id=user_id, top_k=self._memory_top_k
+                )
         except Exception:
             logger.exception(
                 "memory recall failed",
                 extra={"event": "BRAIN_MEMORY_RECALL_FAILED"},
             )
             return None
+        
+        logger.info(
+            "memory recall",
+            extra={
+                "event": "MEMORY_RECALL",
+                "user_id": user_id,
+                "query": text[:80],
+                "count": len(records or []),
+            },
+        )
+
         if not records:
             return None
         lines = ["[MEMORY]"]
@@ -614,6 +847,107 @@ class Brain:
             lines.append(f"- ({record.kind.value}) {record.content}")
         return "\n".join(lines)
 
+
+    async def _handle_memory_command(
+        self,
+        text: str,
+        *,
+        user_id: str,
+        session,
+    ) -> BrainResponse | None:
+        """If ``text`` is a memory-list/forget command, answer deterministically.
+
+        Returns None if the input is not a memory command — caller falls
+        through to the normal LLM loop.
+        """
+        action, payload = _detect_memory_command(text)
+        if not action:
+            return None
+
+        if action == "list":
+            try:
+                records = self._memory.list_for_user(user_id, limit=50)
+            except Exception:
+                logger.exception(
+                    "memory list failed",
+                    extra={"event": "MEMORY_LIST_FAILED", "user_id": user_id},
+                )
+                records = []
+            logger.info(
+                "memory list command",
+                extra={
+                    "event": "MEMORY_LIST_COMMAND",
+                    "user_id": user_id,
+                    "count": len(records),
+                },
+            )
+            reply = _format_memory_list(records)
+            session.add_assistant_message(reply)
+            return BrainResponse(
+                text=reply,
+                session_id=session.id,
+                language=session.language or "en",
+                purpose="memory",
+                model="",
+                provider="memory",
+                used_memory=True,
+                stopped_reason="memory_list",
+                spoken_text=reply,
+            )
+
+        # action == "forget"
+        try:
+            matches = self._memory.search(
+                payload or "", user_id=user_id, limit=20
+            )
+        except Exception:
+            logger.exception(
+                "memory search for forget failed",
+                extra={"event": "MEMORY_FORGET_SEARCH_FAILED"},
+            )
+            matches = []
+
+        if not matches:
+            reply = f"I couldn't find a stored memory matching '{payload}'."
+        else:
+            deleted = 0
+            for r in matches:
+                try:
+                    if self._memory.delete(r.id):
+                        deleted += 1
+                except Exception:
+                    logger.exception(
+                        "memory delete failed",
+                        extra={"event": "MEMORY_DELETE_FAILED",
+                               "memory_id": r.id},
+                    )
+            reply = (
+                f"Forgotten: {deleted} memory item"
+                f"{'s' if deleted != 1 else ''} matching '{payload}'."
+            )
+        logger.info(
+            "memory forget command",
+            extra={
+                "event": "MEMORY_FORGET_COMMAND",
+                "user_id": user_id,
+                "payload": payload,
+                "deleted": deleted if matches else 0,
+            },
+        )
+        session.add_assistant_message(reply)
+        return BrainResponse(
+            text=reply,
+            session_id=session.id,
+            language=session.language or "en",
+            purpose="memory",
+            model="",
+            provider="memory",
+            used_memory=True,
+            stopped_reason="memory_forget",
+            spoken_text=reply,
+        )
+        
+        
     async def _execute_tool(
         self,
         call: ToolCall,
@@ -743,6 +1077,56 @@ def _split_spoken_block(text: str) -> tuple[str, str]:
     spoken = match.group(1).strip()
     display = (text[: match.start()] + text[match.end():]).strip()
     return display, spoken
+
+
+_MEM_LIST_PATTERNS = [
+    re.compile(
+        r"\bwhat (?:do you|have you) (?:remember|know|learned|saved)\b"
+        r".*\babout (?:me|myself)\b", re.IGNORECASE,
+    ),
+    re.compile(r"\bwhat have i (?:told|shared with) you\b", re.IGNORECASE),
+    re.compile(r"\b(?:show|list|tell me)\s+(?:my|all|everything you)\s+"
+               r"(?:memories|memory|facts)\b", re.IGNORECASE),
+    re.compile(r"\bwhat (?:are|do)\s+(?:my|your)\s+memories\b",
+               re.IGNORECASE),
+]
+
+_MEM_FORGET_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?"
+    r"(?:delete the memory about|delete memory of|"
+    r"forget about|forget that|forget)\s+(.+?)[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _detect_memory_command(text: str) -> tuple[str, str | None]:
+    """Return ('list', None) or ('forget', payload) or ('', None)."""
+    if not text:
+        return "", None
+    m = _MEM_FORGET_PATTERN.match(text)
+    if m:
+        return "forget", m.group(1).strip()
+    for pat in _MEM_LIST_PATTERNS:
+        if pat.search(text):
+            return "list", None
+    return "", None
+
+
+def _format_memory_list(records: list) -> str:
+    """Render memory records for a 'what do you remember' reply."""
+    if not records:
+        return "I don't have any stored memories about you yet."
+    lines = [
+        f"Here's what I remember about you ({len(records)} item"
+        f"{'s' if len(records) != 1 else ''}):"
+    ]
+    for r in records:
+        kind = getattr(r, "kind", None)
+        kind_label = (
+            f" *{kind.value}*" if hasattr(kind, "value") else ""
+        )
+        lines.append(f"- {r.content}{kind_label}")
+    return "\n".join(lines)
 
 
 def _fallback_spoken(text: str) -> str:

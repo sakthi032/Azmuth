@@ -21,7 +21,7 @@ import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
-
+import httpx
 from app.core.errors import ProviderError, ProviderUnavailableError
 from app.llm.base import LLMProvider
 from app.llm.messages import (
@@ -58,35 +58,55 @@ class OpenAICompatibleProvider(LLMProvider):
         return self._parse_chat_response(payload, request, latency_ms)
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[StreamChunk]:
+        """Stream a completion over HTTP, cancellable via task.cancel().
+
+        Uses httpx.AsyncClient so that when the consumer coroutine is
+        cancelled, the underlying HTTP connection is closed — the model
+        stops generating and no further tokens are billed.
+        """
         if not self.is_available():
             raise ProviderUnavailableError(
                 "openai_compatible provider needs LLM_BASE_URL and LLM_MODEL"
             )
 
         body = self._build_body(request, stream=True)
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[StreamChunk | BaseException | None] = asyncio.Queue()
-
-        def produce() -> None:
-            try:
-                for chunk in self._iter_sse_sync(body):
-                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
-            except BaseException as exc:  # noqa: BLE001 - re-raised on consumer
-                loop.call_soon_threadsafe(queue.put_nowait, exc)
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
-
-        threading.Thread(
-            target=produce, name="azmuth-llm-sse", daemon=True
-        ).start()
-
-        while True:
-            item = await queue.get()
-            if item is None:
-                return
-            if isinstance(item, BaseException):
-                raise item
-            yield item
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                async with client.stream(
+                    "POST",
+                    self._chat_url(),
+                    json=body,
+                    headers=self._headers(),
+                ) as response:
+                    if response.status_code >= 400:
+                        detail = await response.aread()
+                        raise ProviderError(
+                            f"LLM HTTP {response.status_code}: "
+                            f"{detail.decode('utf-8', 'replace')}"
+                        )
+                    index = 0
+                    async for raw_line in response.aiter_lines():
+                        line = raw_line.rstrip("\r\n")
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload_text = line[5:].strip()
+                        if payload_text == "[DONE]":
+                            return
+                        try:
+                            payload = json.loads(payload_text)
+                        except json.JSONDecodeError:
+                            continue
+                        for chunk in self._chunks_from_event(payload, index):
+                            yield chunk
+                            index += 1
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError(
+                f"LLM HTTP {exc.response.status_code}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ProviderUnavailableError(
+                f"LLM request failed: {exc}"
+            ) from exc
 
     def get_model_info(self) -> ModelInfo:
         return ModelInfo(

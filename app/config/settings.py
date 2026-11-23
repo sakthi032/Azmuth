@@ -209,6 +209,13 @@ class Settings:
     location_units: str
     paths: Paths
 
+    # ---- Brain performance (Phase 1.3 / 1.4) ----------------------------
+    tool_availability_cache_ttl: float
+    memory_hybrid_recall: bool
+
+    # ---- Reminders ------------------------------------------------------
+    reminder_channels: tuple[str, ...]
+
     # -- helpers ----------------------------------------------------------
     @property
     def is_development(self) -> bool:
@@ -577,9 +584,18 @@ def load_settings(
         location_region=_get_str(env, "AZMUTH_LOCATION_REGION"),
         location_country=_get_str(env, "AZMUTH_LOCATION_COUNTRY"),
         location_country_code=_get_str(env, "AZMUTH_LOCATION_COUNTRY_CODE"),
-        location_timezone=_get_str(env, "AZMUTH_LOCATION_TIMEZONE"),
+        location_timezone=_get_str(env, "AZMUTH_LOCATION_TIMEZONE", "Asia/Kolkata") or "Asia/Kolkata",
         location_currency=_get_str(env, "AZMUTH_LOCATION_CURRENCY"),
         location_units=(_get_str(env, "AZMUTH_LOCATION_UNITS", "metric") or "metric").lower(),
+
+        # Phase 1.3 / 1.4 new settings
+        tool_availability_cache_ttl=_get_float(
+            env, "TOOL_AVAILABILITY_CACHE_TTL", 3.0, minimum=0.1
+        ),
+        memory_hybrid_recall=_get_bool(env, "MEMORY_HYBRID_RECALL", True),
+
+        # Reminders
+        reminder_channels=_get_csv(env, "REMINDER_CHANNELS") or ("chat", "toast", "voice"),
         
     )
 

@@ -89,10 +89,78 @@ def release_automation_lock() -> None:
 def is_automation_locked() -> bool:
     return _lock.locked()
 
+import time as _time
+import threading as _threading
+
+# ── Last non-self foreground window (for capture) ─────────────────
+_last_non_self_lock = _threading.Lock()
+_last_non_self_hwnd: int = 0
+_last_non_self_title: str = ""
+_poller_thread: _threading.Thread | None = None
+_poller_stop = _threading.Event()
+
+
+def _poller_loop(interval: float = 0.5) -> None:
+    """Poll the foreground window; remember the most recent non-self one."""
+    global _last_non_self_hwnd, _last_non_self_title
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    while not _poller_stop.is_set():
+        try:
+            hwnd = int(user32.GetForegroundWindow() or 0)
+            if hwnd and hwnd != 0:
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if int(pid.value) != _OWN_PID:
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
+                    with _last_non_self_lock:
+                        _last_non_self_hwnd = hwnd
+                        _last_non_self_title = buf.value
+        except Exception:
+            pass
+        _poller_stop.wait(interval)
+
+
+def start_foreground_poller() -> None:
+    """Start the poller once. Safe to call repeatedly."""
+    global _poller_thread
+    if _poller_thread is not None and _poller_thread.is_alive():
+        return
+    _poller_stop.clear()
+    _poller_thread = _threading.Thread(
+        target=_poller_loop,
+        name="azmuth-fg-poller",
+        daemon=True,
+    )
+    _poller_thread.start()
+
+
+def last_non_self_foreground() -> tuple[int, str]:
+    """(hwnd, title) of the most recent non-Azmuth foreground window."""
+    with _last_non_self_lock:
+        return _last_non_self_hwnd, _last_non_self_title
+
+
+def clear_last_non_self() -> None:
+    global _last_non_self_hwnd, _last_non_self_title
+    with _last_non_self_lock:
+        _last_non_self_hwnd = 0
+        _last_non_self_title = ""
+
+
 __all__ = [
     "own_pid",
     "foreground_pid",
     "foreground_window_title",
     "is_self_foreground",
     "describe_foreground",
+    "acquire_automation_lock",
+    "release_automation_lock",
+    "is_automation_locked",
+    "start_foreground_poller",
+    "last_non_self_foreground",
+    "clear_last_non_self",
 ]

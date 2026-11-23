@@ -31,7 +31,7 @@ The ``executor`` callback is an *async* coroutine::
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import contextlib  # noqa: F401  (kept for optional suppression)
 import json
 import logging
 import sqlite3
@@ -40,6 +40,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -108,11 +109,13 @@ class PersistentScheduler:
     def __init__(
         self,
         db_path: str | Path = "data/scheduler.db",
-        poll_interval: float = 30.0,
+        poll_interval: float = 1.0,
+        event_bus: "Any | None" = None,
     ) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._poll_interval = poll_interval
+        self._event_bus = event_bus
         self._executor: ExecutorCallback | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -129,17 +132,7 @@ class PersistentScheduler:
         executor: ExecutorCallback,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
-        """Start the background scheduler thread.
-
-        Parameters
-        ----------
-        executor:
-            Async coroutine called with ``(prompt, agent, task_id)`` for
-            each due task.
-        loop:
-            Running event loop to submit coroutines to. If *None*, the
-            current running loop is used (``asyncio.get_event_loop()``).
-        """
+        """Start the background scheduler thread."""
         self._executor = executor
         self._loop = loop or asyncio.get_event_loop()
         self._stop_event.clear()
@@ -170,16 +163,7 @@ class PersistentScheduler:
         agent: str = "default",
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        """Create and persist a new scheduled task.
-
-        Returns the new task ID.
-
-        Raises
-        ------
-        ValueError
-            If ``schedule_type`` is ``'cron'`` but ``croniter`` is not
-            installed, or if the cron expression is invalid.
-        """
+        """Create and persist a new scheduled task."""
         if schedule_type not in {"once", "interval", "cron"}:
             raise ValueError(
                 f"Invalid schedule_type={schedule_type!r}. "
@@ -194,6 +178,20 @@ class PersistentScheduler:
         task_id = str(uuid.uuid4())
         now = _utcnow_ts()
         next_run = self._compute_next_run(schedule_type, schedule_value, now)
+
+        if schedule_type == "once" and next_run is not None:
+            existing = self._con.execute(
+                "SELECT id FROM scheduled_tasks "
+                "WHERE prompt=? AND schedule_type='once' AND status='active' "
+                "AND next_run BETWEEN ? AND ?",
+                (prompt, next_run - 10, next_run + 10),
+            ).fetchone()
+            if existing:
+                logger.info(
+                    "Deduplicating reminder: returning existing task %s",
+                    existing[0],
+                )
+                return existing[0]
 
         with self._con:
             self._con.execute(
@@ -226,6 +224,116 @@ class PersistentScheduler:
         )
         return task_id
 
+    def schedule_reminder(
+        self,
+        message: str,
+        delay_seconds: float,
+        *,
+        agent: str = "default",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Schedule a reminder ``delay_seconds`` from now (relative, unambiguous)."""
+        if delay_seconds <= 0:
+            raise ValueError("delay_seconds must be positive")
+
+        task_id = str(uuid.uuid4())
+        now = _utcnow_ts()
+        next_run = now + float(delay_seconds)
+
+        existing = self._con.execute(
+            "SELECT id FROM scheduled_tasks "
+            "WHERE prompt=? AND schedule_type='once' AND status='active' "
+            "AND next_run BETWEEN ? AND ?",
+            (message, next_run - 10, next_run + 10),
+        ).fetchone()
+        if existing:
+            logger.info(
+                "Deduplicating reminder: returning existing task %s",
+                existing[0],
+            )
+            return existing[0]
+
+        with self._con:
+            self._con.execute(
+                """
+                INSERT INTO scheduled_tasks
+                    (id, prompt, schedule_type, schedule_value, agent,
+                     status, next_run, last_run, metadata, created_at)
+                VALUES (?,?,?,?,?,  'active',?,NULL,?,?)
+                """,
+                (
+                    task_id,
+                    message,
+                    "once",
+                    f"{delay_seconds:g}",
+                    agent,
+                    next_run,
+                    json.dumps(metadata or {}),
+                    now,
+                ),
+            )
+
+        logger.info(
+            "Scheduled reminder %s next_run=%s (in %.2fs)",
+            task_id,
+            datetime.fromtimestamp(next_run, tz=timezone.utc).isoformat(),
+            delay_seconds,
+        )
+        return task_id
+
+    def schedule_reminder_at(
+        self,
+        *,
+        message: str,
+        target_dt_utc: datetime,
+        agent: str = "default",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Schedule a reminder at an explicit UTC datetime.
+
+        ``target_dt_utc`` must be tz-aware. Due time is authoritative —
+        no wall-clock reinterpretation happens here.
+        """
+        if target_dt_utc.tzinfo is None:
+            raise ValueError("target_dt_utc must be tz-aware")
+
+        task_id = str(uuid.uuid4())
+        now = _utcnow_ts()
+        next_run = target_dt_utc.astimezone(timezone.utc).timestamp()
+        if next_run <= now:
+            raise ValueError(
+                "target_dt_utc is in the past "
+                f"({datetime.fromtimestamp(next_run, tz=timezone.utc).isoformat()})"
+            )
+
+        with self._con:
+            self._con.execute(
+                """
+                INSERT INTO scheduled_tasks
+                    (id, prompt, schedule_type, schedule_value, agent,
+                     status, next_run, last_run, metadata, created_at)
+                VALUES (?,?,?,?,?,  'active',?,NULL,?,?)
+                """,
+                (
+                    task_id,
+                    message,
+                    "once",
+                    "explicit",
+                    agent,
+                    next_run,
+                    json.dumps(metadata or {}),
+                    now,
+                ),
+            )
+
+        logger.info(
+            "Scheduled reminder %s at %s (in %.1fs)",
+            task_id,
+            datetime.fromtimestamp(next_run, tz=timezone.utc).isoformat(),
+            next_run - now,
+        )
+        return task_id
+
     def cancel_task(self, task_id: str) -> bool:
         """Mark a task as completed (cancelled). Returns True if found."""
         with self._con:
@@ -247,7 +355,8 @@ class PersistentScheduler:
     def resume_task(self, task_id: str) -> bool:
         """Resume a paused task. Returns True if found."""
         row = self._con.execute(
-            "SELECT schedule_type, schedule_value FROM scheduled_tasks WHERE id=? AND status='paused'",
+            "SELECT schedule_type, schedule_value FROM scheduled_tasks "
+            "WHERE id=? AND status='paused'",
             (task_id,),
         ).fetchone()
         if not row:
@@ -271,7 +380,12 @@ class PersistentScheduler:
             rows = self._con.execute(
                 "SELECT * FROM scheduled_tasks ORDER BY next_run"
             ).fetchall()
-        cols = [d[0] for d in self._con.execute("SELECT * FROM scheduled_tasks LIMIT 0").description]
+        cols = [
+            d[0]
+            for d in self._con.execute(
+                "SELECT * FROM scheduled_tasks LIMIT 0"
+            ).description
+        ]
         return [dict(zip(cols, row)) for row in rows]
 
     def task_history(self, task_id: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -280,7 +394,12 @@ class PersistentScheduler:
             "SELECT * FROM task_history WHERE task_id=? ORDER BY ran_at DESC LIMIT ?",
             (task_id, limit),
         ).fetchall()
-        cols = [d[0] for d in self._con.execute("SELECT * FROM task_history LIMIT 0").description]
+        cols = [
+            d[0]
+            for d in self._con.execute(
+                "SELECT * FROM task_history LIMIT 0"
+            ).description
+        ]
         return [dict(zip(cols, row)) for row in rows]
 
     # ------------------------------------------------------------------
@@ -291,8 +410,13 @@ class PersistentScheduler:
         """Background thread: check for due tasks every ``poll_interval``."""
         logger.debug("PersistentScheduler poll loop started")
         while not self._stop_event.is_set():
-            with contextlib.suppress(Exception):
+            try:
                 self._tick()
+            except Exception:
+                logger.exception(
+                    "scheduler tick failed",
+                    extra={"event": "SCHEDULER_TICK_ERROR"},
+                )
             self._stop_event.wait(self._poll_interval)
         logger.debug("PersistentScheduler poll loop exited")
 
@@ -301,7 +425,7 @@ class PersistentScheduler:
         now = _utcnow_ts()
         rows = self._con.execute(
             """
-            SELECT id, prompt, schedule_type, schedule_value, agent
+            SELECT id, prompt, schedule_type, schedule_value, agent, next_run
             FROM   scheduled_tasks
             WHERE  status = 'active'
               AND  next_run IS NOT NULL
@@ -311,8 +435,24 @@ class PersistentScheduler:
             (now,),
         ).fetchall()
 
-        for task_id, prompt, stype, sval, agent in rows:
-            self._dispatch(task_id, prompt, stype, sval, agent, now)
+        for task_id, prompt, stype, sval, agent, next_run in rows:
+            is_missed = next_run is not None and next_run < (now - 5.0)
+            logger.info(
+                "Task due: %r (id=%s, scheduled_for=%.1f, is_missed=%s)",
+                prompt,
+                task_id,
+                next_run or now,
+                is_missed,
+                extra={
+                    "event": "TASK_DUE",
+                    "task_id": task_id,
+                    "prompt": prompt,
+                    "is_missed": is_missed,
+                },
+            )
+            self._dispatch(
+                task_id, prompt, stype, sval, agent, now, next_run, is_missed
+            )
 
     def _dispatch(
         self,
@@ -322,14 +462,24 @@ class PersistentScheduler:
         schedule_value: str,
         agent: str,
         now: float,
+        scheduled_ts: float | None = None,
+        is_missed: bool = False,
     ) -> None:
         """Submit a due task to the async executor."""
-        # Compute the next_run BEFORE dispatching so we don't double-fire
+        logger.info(
+            "Task firing: %r (id=%s, agent=%s)",
+            prompt,
+            task_id,
+            agent,
+            extra={"event": "TASK_FIRING", "task_id": task_id},
+        )
         if schedule_type == "once":
             next_run = None
             new_status = "completed"
         else:
-            next_run = self._compute_next_run(schedule_type, schedule_value, now)
+            next_run = self._compute_next_run(
+                schedule_type, schedule_value, now
+            )
             new_status = "active"
 
         with self._con:
@@ -344,10 +494,11 @@ class PersistentScheduler:
 
         if self._executor and self._loop:
             future = asyncio.run_coroutine_threadsafe(
-                self._run_executor(task_id, prompt, agent, now),
+                self._run_executor(
+                    task_id, prompt, agent, now, scheduled_ts, is_missed
+                ),
                 self._loop,
             )
-            # Fire-and-forget; errors logged inside _run_executor
             future.add_done_callback(lambda f: f.exception() and None)
 
     async def _run_executor(
@@ -356,18 +507,94 @@ class PersistentScheduler:
         prompt: str,
         agent: str,
         dispatch_ts: float,
+        scheduled_ts: float | None = None,
+        is_missed: bool = False,
     ) -> None:
         """Call the user-supplied executor and record the result."""
         t0 = _utcnow_ts()
         error: str | None = None
+        due_ts = scheduled_ts if scheduled_ts is not None else dispatch_ts
+        due_dt_ist = datetime.fromtimestamp(due_ts, tz=ZoneInfo("Asia/Kolkata"))
+        due_ist = due_dt_ist.isoformat()
+
+        payload = {
+            "task_id": task_id,
+            "message": prompt,
+            "prompt": prompt,
+            "agent": agent,
+            "due_time": due_dt_ist,
+            "due_time_ist": due_ist,
+            "is_missed": is_missed,
+        }
+
+        # REMINDER_DUE fires at due time — independent of executor outcome.
+        if self._event_bus is not None:
+            try:
+                from app.core.events import Event, EventName
+
+                await self._event_bus.publish(
+                    Event(
+                        name=EventName.REMINDER_DUE,
+                        source="scheduler",
+                        payload=payload,
+                    )
+                )
+            except Exception as _eb_exc:
+                logger.warning(
+                    "Could not emit REMINDER_DUE event: %s", _eb_exc
+                )
+
         try:
             assert self._executor is not None
-            await self._executor(prompt, agent, task_id)
+            try:
+                await self._executor(prompt, agent, task_id)
+            except TypeError:
+                await self._executor(prompt, agent)
+
+            # REMINDER_FIRED only after successful delivery.
+            if self._event_bus is not None:
+                try:
+                    from app.core.events import Event, EventName
+
+                    await self._event_bus.publish(
+                        Event(
+                            name=EventName.REMINDER_FIRED,
+                            source="scheduler",
+                            payload=payload,
+                        )
+                    )
+                except Exception as _eb_exc:
+                    logger.warning(
+                        "Could not emit REMINDER_FIRED event: %s", _eb_exc
+                    )
+
             status = "ok"
+            duration = _utcnow_ts() - t0
+            logger.info(
+                "Task completed successfully: %r (id=%s, duration=%.2fs)",
+                prompt,
+                task_id,
+                duration,
+                extra={
+                    "event": "TASK_FIRED",
+                    "task_id": task_id,
+                    "duration": duration,
+                },
+            )
         except Exception as exc:
             error = str(exc)
             status = "error"
-            logger.error("Scheduled task %s failed: %s", task_id, exc)
+            logger.error(
+                "Task failed: %r (id=%s): %s",
+                prompt,
+                task_id,
+                exc,
+                extra={
+                    "event": "TASK_FAILED",
+                    "task_id": task_id,
+                    "error": error,
+                },
+            )
             with self._con:
                 self._con.execute(
                     "UPDATE scheduled_tasks SET last_error=? WHERE id=?",
@@ -377,7 +604,8 @@ class PersistentScheduler:
         duration = _utcnow_ts() - t0
         with self._con:
             self._con.execute(
-                "INSERT INTO task_history(task_id,ran_at,status,error,duration_s) VALUES(?,?,?,?,?)",
+                "INSERT INTO task_history(task_id,ran_at,status,error,duration_s) "
+                "VALUES(?,?,?,?,?)",
                 (task_id, dispatch_ts, status, error, duration),
             )
 
@@ -411,8 +639,19 @@ class PersistentScheduler:
                     target = target.replace(tzinfo=timezone.utc)
                 return target.timestamp()
             except ValueError:
-                # Treat as relative seconds from now
+                pass
+            try:
+                from app.tasks.time_parser import parse_schedule_expression
+
+                parsed = parse_schedule_expression(schedule_value)
+                if parsed.target_dt_utc is not None:
+                    return parsed.target_dt_utc.timestamp()
+            except Exception:
+                pass
+            try:
                 return from_ts + float(schedule_value)
+            except ValueError:
+                return from_ts + 60.0
 
         elif schedule_type == "interval":
             seconds = float(schedule_value)

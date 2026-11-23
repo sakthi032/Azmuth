@@ -715,6 +715,12 @@ class FocusWindowTool(Tool):
 
     async def execute(self, *, identifier: str) -> dict[str, Any]:
         focused = await self._automation.focus_window(identifier)
+        if not focused:
+            raise AutomationError(
+                f"focus_window failed for {identifier!r}: window exists but could not be "
+                f"brought to foreground (another process may hold the foreground lock). "
+                f"Strategy: use type_into_app instead, or call set_window_state('restore') first."
+            )
         return {"identifier": identifier, "focused": focused}
 
 
