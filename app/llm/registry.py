@@ -231,25 +231,30 @@ def build_default_registry(settings: Any = None) -> ModelRegistry:
         description="Local Ollama embeddings for memory retrieval.",
     ))
 
-    # ---- CHAT: general conversation -------------------------------------
+
+# ============================================================
+# NVIDIA NIM MODEL REGISTRY
+# ============================================================
+
+    # ---- CHAT --------------------------------------------------
     registry.register(ModelSpec(
-        name="z-ai/glm-5.3",
+        name="minimaxai/minimax-m3.1-flash",
         provider="nvidia_nim",
         purposes=frozenset({ModelPurpose.CHAT}),
         context_window=128_000,
         is_local=False,
         tier=1,
-        description="GLM 5.3. Primary chat model.",
+        description="MiniMax M3.1 Flash. Primary agentic chat model.",
     ))
 
     registry.register(ModelSpec(
-        name="deepseek-ai/deepseek-v4.1-flash",
+        name="google/gemma-4-31b-it",
         provider="nvidia_nim",
         purposes=frozenset({ModelPurpose.CHAT}),
         context_window=128_000,
         is_local=False,
         tier=2,
-        description="DeepSeek V4.1 Flash. Chat fallback.",
+        description="Gemma 4 31B. Chat fallback.",
     ))
 
     registry.register(ModelSpec(
@@ -259,10 +264,11 @@ def build_default_registry(settings: Any = None) -> ModelRegistry:
         context_window=128_000,
         is_local=False,
         tier=3,
-        description="Nemotron 3.5 Lightning. Fast chat fallback.",
+        description="Nemotron Lightning. Final chat fallback.",
     ))
 
-    # ---- REASONING: hard problems, math, planning -----------------------
+
+    # ---- REASONING ---------------------------------------------
     registry.register(ModelSpec(
         name="nvidia/nemotron-3-ultra-550b-a55b",
         provider="nvidia_nim",
@@ -270,48 +276,49 @@ def build_default_registry(settings: Any = None) -> ModelRegistry:
         context_window=128_000,
         is_local=False,
         tier=1,
-        description="Nemotron 3 Ultra 550B. Primary reasoner.",
+        description="Nemotron Ultra. Primary reasoning model.",
     ))
 
     registry.register(ModelSpec(
-        name="deepseek-ai/deepseek-v4.1-flash",
+        name="google/gemma-4-31b-it",
         provider="nvidia_nim",
         purposes=frozenset({ModelPurpose.REASONING}),
         context_window=128_000,
         is_local=False,
         tier=2,
-        description="DeepSeek V4.1 Flash. Reasoning fallback.",
+        description="Gemma 4 31B. Reasoning fallback.",
     ))
 
     registry.register(ModelSpec(
-        name="z-ai/glm-5.3",
+        name="minimaxai/minimax-m3.1-flash",
         provider="nvidia_nim",
         purposes=frozenset({ModelPurpose.REASONING}),
         context_window=128_000,
         is_local=False,
         tier=3,
-        description="GLM 5.3. Reasoning fallback.",
+        description="MiniMax M3.1 Flash. Final reasoning fallback.",
     ))
 
-    # ---- CODING ---------------------------------------------------------
+
+    # ---- CODING ------------------------------------------------
     registry.register(ModelSpec(
-        name="deepseek-ai/deepseek-v4.1-flash",
+        name="moonshotai/kimi-k3.1-pro",
         provider="nvidia_nim",
         purposes=frozenset({ModelPurpose.CODING}),
         context_window=128_000,
         is_local=False,
         tier=1,
-        description="DeepSeek V4.1 Flash. Primary coding model.",
+        description="Kimi K3.1 Pro. Primary agentic coding model.",
     ))
 
     registry.register(ModelSpec(
-        name="z-ai/glm-5.3",
+        name="google/gemma-4-31b-it",
         provider="nvidia_nim",
         purposes=frozenset({ModelPurpose.CODING}),
         context_window=128_000,
         is_local=False,
         tier=2,
-        description="GLM 5.3. Coding fallback.",
+        description="Gemma 4 31B. Coding fallback.",
     ))
 
     registry.register(ModelSpec(
@@ -321,10 +328,11 @@ def build_default_registry(settings: Any = None) -> ModelRegistry:
         context_window=128_000,
         is_local=False,
         tier=3,
-        description="Nemotron 3 Ultra. Complex coding fallback.",
+        description="Nemotron Ultra. Complex coding fallback.",
     ))
 
-    # ---- FAST: short lookups, quick questions ---------------------------
+
+    # ---- FAST --------------------------------------------------
     registry.register(ModelSpec(
         name="nvidia/nemotron-3.5-lightning-30b-a3b",
         provider="nvidia_nim",
@@ -332,28 +340,29 @@ def build_default_registry(settings: Any = None) -> ModelRegistry:
         context_window=128_000,
         is_local=False,
         tier=1,
-        description="Nemotron 3.5 Lightning. Primary fast model.",
+        description="Nemotron Lightning. Primary fast model.",
     ))
 
     registry.register(ModelSpec(
-        name="deepseek-ai/deepseek-v4.1-flash",
+        name="nvidia/nemotron-3.5-bolt-e4b",
         provider="nvidia_nim",
         purposes=frozenset({ModelPurpose.FAST}),
         context_window=128_000,
         is_local=False,
         tier=2,
-        description="DeepSeek V4.1 Flash. Fast fallback.",
+        description="Nemotron Bolt E4B. Fast fallback.",
     ))
 
     registry.register(ModelSpec(
-        name="z-ai/glm-5.3",
+        name="google/gemma-4-31b-it",
         provider="nvidia_nim",
         purposes=frozenset({ModelPurpose.FAST}),
         context_window=128_000,
         is_local=False,
         tier=3,
-        description="GLM 5.3. Final cloud fallback.",
+        description="Gemma 4 31B. Final fast fallback.",
     ))
+
 
     # ---- INDEPENDENT CLOUD FALLBACK: GROQ -------------------------------
     registry.register(ModelSpec(
