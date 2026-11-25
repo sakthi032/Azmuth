@@ -53,6 +53,7 @@ from app.voice.input_manager import UserInput
 from app.brain.planner import AutonomousPlanner, PlanStatus, StepStatus, is_planning_goal
 from app.brain.loop_guard import LoopGuard, LoopDetectedError
 from app.llm.messages import ChatRequest, ChatResponse, ModelInfo
+from app.tools.base import Tool, ToolMetadata, ToolResult
 
 logger = get_logger("brain.pipeline")
 
@@ -1042,11 +1043,11 @@ class Brain:
                     arguments=dict(call.arguments),
                     capability=metadata.capability.value,
                     risk_level=metadata.risk_level.value,
-                    description=(
-                        f"Azmuth wants to run '{call.name}' "
-                        f"({metadata.capability.value}, {metadata.risk_level.value} risk)"
+                    description=_confirmation_description(
+                        call.name, call.arguments, metadata,
                     ),
-                )
+                 )
+                
                 try:
                     confirmed = await confirmer(request)
                 except Exception:
@@ -1115,6 +1116,20 @@ def _tool_result_text(record: ToolExecutionRecord) -> str:
             return json.dumps(output, ensure_ascii=False, default=str)
         return str(output)
     return record.error or "unknown error"
+
+def _confirmation_description(
+    tool_name: str,
+    arguments: dict[str, Any],
+    metadata: Any,
+) -> str:
+    if tool_name == "run_python":
+        code = str(arguments.get("code", ""))
+        preview = code if len(code) <= 1500 else code[:1500] + "\n... (truncated)"
+        return f"Azmuth wants to run this Python code:\n\n{preview}"
+    return (
+        f"Azmuth wants to run '{tool_name}' "
+        f"({metadata.capability.value}, {metadata.risk_level.value} risk)"
+    )
 
 
 _SPOKEN_RE = re.compile(

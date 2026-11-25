@@ -520,6 +520,23 @@ def build_azmuth(
         except Exception:
             logger.exception("PC control tools registration failed")
 
+        # ---- sandboxed code execution -----------------------------------
+        try:
+            from app.documents.session_files import get_registry
+            from app.tools.builtin.code_exec import (
+                CodeSandbox, RunPythonTool,
+            )
+            tool_manager.register(RunPythonTool(
+                CodeSandbox(),
+                workspace_policy=perms.workspace_policy,
+                session_files=get_registry(),
+            ))
+            logger.info(
+                "run_python registered",
+                extra={"event": "RUN_PYTHON_READY"},
+            )
+        except Exception:
+            logger.exception("run_python registration failed")
 
     # ---- voice -----------------------------------------------------------
     from app.voice.sources import build_audio_source

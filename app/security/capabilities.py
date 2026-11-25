@@ -49,6 +49,9 @@ class Capability(str, Enum):
     RUN_SAFE_COMMAND = "run_safe_command"
     DEVELOPER_TOOLS = "developer_tools"
     ADVANCED_AUTOMATION = "advanced_automation"
+    # Execute Python code in a sandboxed subprocess. Creator-only;
+    # confirmation is provided by the tool itself.
+    RUN_SANDBOXED_CODE = "run_sandboxed_code"
     # Reversible PC state control (volume, mute, brightness,
     # open folder/website). Creator-only, no confirmation required.
     CONTROL_SYSTEM_STATE = "control_system_state"
@@ -135,6 +138,12 @@ DEFAULT_POLICY: dict[Capability, CapabilityPolicy] = {
             "open a folder or website."
         ),
     ),
+
+    Capability.RUN_SANDBOXED_CODE: CapabilityPolicy(
+        PermissionMode.CREATOR,
+        description="Execute Python code in an isolated sandbox.",
+    ),
+    
 
 
     # ---- creator-only, destructive ----
