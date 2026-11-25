@@ -233,7 +233,7 @@ def test_list_returns_newest_first() -> None:
         mgr = TaskManager(max_concurrent=2)
         for i in range(3):
             mgr.submit(lambda _t: asyncio.sleep(0), name=f"t{i}")
-            await asyncio.sleep(0.001)  # ensure distinct created_at
+            await asyncio.sleep(0.02)  # ensure distinct created_at
         return list(mgr.list())
 
     tasks = asyncio.run(main())

@@ -477,7 +477,7 @@ def load_settings(
             )
             or "https://generativelanguage.googleapis.com/v1beta/openai/"
         ),
-        gemini_api_key=_get_str(env, "GEMINI_API_KEY"),
+        gemini_api_key=_get_str(env, "GEMINI_API_KEY") or _get_str(env, "GOOGLE_API_KEY"),
         search_provider=(
             _get_str(env, "SEARCH_PROVIDER", "null") or "null"
         ).lower(),

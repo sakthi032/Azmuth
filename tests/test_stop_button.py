@@ -151,3 +151,25 @@ async def test_no_duplicate_stopped_marker():
     stopped_count = sum(1 for t in texts if "Stopped" in t)
     # Zero is acceptable here — the *UI handler* adds it, not the bridge
     assert stopped_count <= 1, f"found {stopped_count} Stopped markers"
+
+@pytest.mark.asyncio
+async def test_stop_during_web_search_under_2s():
+    """Bug 10 explicit web-search scenario — Stop during a search_web
+    tool round must terminate the turn in <2 s."""
+    async def search_round_responder(
+        user_input, conversation_id, confirmer, on_delta=None
+    ):
+        # Simulates the pipeline blocking on a search_web tool round
+        await asyncio.sleep(60.0)
+        return "never", "s", "m", "p", ""
+
+    controller = _make_controller(search_round_responder)
+    task = asyncio.create_task(
+        controller.send_text("search the web for gold price news")
+    )
+    await asyncio.sleep(0.1)
+    t0 = time.monotonic()
+    controller.cancel_in_flight()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+    assert time.monotonic() - t0 < 2.0

@@ -49,13 +49,18 @@ class Capability(str, Enum):
     RUN_SAFE_COMMAND = "run_safe_command"
     DEVELOPER_TOOLS = "developer_tools"
     ADVANCED_AUTOMATION = "advanced_automation"
-
+    # Reversible PC state control (volume, mute, brightness,
+    # open folder/website). Creator-only, no confirmation required.
+    CONTROL_SYSTEM_STATE = "control_system_state"
     # -------- creator-only, destructive — confirmation required -----------
     DELETE_FILE = "delete_file"
     RUN_SYSTEM_COMMAND = "run_system_command"
     MODIFY_SYSTEM_CONFIG = "modify_system_config"
     MANAGE_SECURITY = "manage_security"
     MANAGE_PLUGINS = "manage_plugins"
+    # Disruptive PC actions (lock session, schedule shutdown).
+    # Creator + confirmation required.
+    CONTROL_POWER = "control_power"
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +128,15 @@ DEFAULT_POLICY: dict[Capability, CapabilityPolicy] = {
         description="Advanced device automation. Creator + confirmation required.",
     ),
 
+    Capability.CONTROL_SYSTEM_STATE: CapabilityPolicy(
+        PermissionMode.CREATOR,
+        description=(
+            "Adjust reversible system state: volume, mute, brightness, "
+            "open a folder or website."
+        ),
+    ),
+
+
     # ---- creator-only, destructive ----
     Capability.DELETE_FILE: CapabilityPolicy(
         PermissionMode.CREATOR,
@@ -149,4 +163,14 @@ DEFAULT_POLICY: dict[Capability, CapabilityPolicy] = {
         requires_confirmation=True,
         description="Install or remove plugins.",
     ),
+    
+    Capability.CONTROL_POWER: CapabilityPolicy(
+        PermissionMode.CREATOR,
+        requires_confirmation=True,
+        description=(
+            "Lock the session or schedule a shutdown. Creator + "
+            "confirmation required."
+        ),
+    ),    
+    
 }

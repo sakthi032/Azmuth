@@ -12,6 +12,7 @@ Two kinds of fixture live here:
 
 from __future__ import annotations
 
+import socket
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,36 @@ from app.llm.messages import (
 from app.search.base import SearchProvider
 from app.search.models import SearchQuery, SearchResult
 from app.security.modes import AssuranceLevel, PermissionMode, Principal
+
+
+# ---------------------------------------------------------------------------
+# Network guard
+# ---------------------------------------------------------------------------
+_ALLOWED_NET_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+@pytest.fixture(autouse=True)
+def block_outbound_network(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Block outbound socket connections unless marked with @pytest.mark.network or connecting to localhost."""
+    if "network" in request.keywords:
+        return
+
+    orig_connect = socket.socket.connect
+
+    def guarded_connect(self: socket.socket, address: Any) -> None:
+        host = address[0] if isinstance(address, tuple) and address else address
+        if isinstance(host, str):
+            host_clean = host.lower()
+            if host_clean in _ALLOWED_NET_HOSTS or host_clean.startswith("127."):
+                return orig_connect(self, address)
+        raise RuntimeError(
+            f"Outbound network call blocked during test: attempted connection to {address}. "
+            f"Mark the test with @pytest.mark.network if it legitimately requires real network access."
+        )
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +155,7 @@ class ScriptedLLM(LLMProvider):
 
     def __init__(self, responses: list[str] | str) -> None:
         super().__init__(model="scripted")
+        self._repeat = isinstance(responses, str)
         self._script = [responses] if isinstance(responses, str) else list(responses)
         self.calls: list[ChatRequest] = []
 
@@ -132,7 +164,12 @@ class ScriptedLLM(LLMProvider):
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         self.calls.append(request)
-        text = self._script.pop(0) if self._script else ""
+        if self._script:
+            text = self._script.pop(0)
+            if self._repeat:
+                self._script.append(text)
+        else:
+            text = ""
         return ChatResponse(
             content=text, model="scripted", provider="scripted",
         )

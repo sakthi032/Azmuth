@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import queue
 import re
 import threading
 from typing import Any
@@ -65,6 +66,7 @@ class AzmuthDesktopApp:
         self._reminder_notifier = None
         self._scheduler = scheduler
         self._pending_attachment: str | None = None
+        self._turn_in_flight = False
         self._root = tk.Tk()
         self._root.title(title)
 
@@ -84,11 +86,15 @@ class AzmuthDesktopApp:
         self._root.geometry(f"{win_w}x{win_h}+{win_x}+{win_y}")
         self._root.minsize(700, 480)
 
-        # Route UIState listener callbacks onto the Tk thread.
+        # Route UIState listener callbacks onto the Tk thread via a
+        # thread-safe queue so background threads never call root.after().
+        self._ui_queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._ui_pump_after_id: str | None = None
         try:
-            self._state.set_dispatcher(lambda fn: self._root.after(0, fn))
+            self._state.set_dispatcher(self._ui_queue.put)
         except Exception:
             logger.exception("could not install UIState dispatcher")
+        self._ui_pump_after_id = self._root.after(15, self._drain_ui_queue)
 
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
@@ -186,7 +192,11 @@ class AzmuthDesktopApp:
         main.rowconfigure(2, weight=0)
         main.columnconfigure(0, weight=1)
 
-        self._transcript = TranscriptView(main, self._state)
+        self._transcript = TranscriptView(
+            main,
+            self._state,
+            on_stream_active_change=self._on_transcript_stream_change,
+        )
         self._transcript.grid(row=0, column=0, sticky="nsew",
                               padx=4, pady=(4, 0))
 
@@ -339,8 +349,27 @@ class AzmuthDesktopApp:
             await self._do_send_and_speak(question.strip(), llm_hint=hint)
         self._submit(_countdown_then_send())
 
+    def _on_transcript_stream_change(self, _active: bool) -> None:
+        self._sync_streaming_controls()
+
+    def _sync_streaming_controls(self) -> None:
+        streaming = self._turn_in_flight or self._transcript.is_streaming
+        try:
+            self._input_row.set_streaming(streaming)
+        except Exception:
+            pass
+
     def _handle_stop(self) -> None:
-       # Reset UI IMMEDIATELY. Do not wait for the worker.
+        # Reset UI IMMEDIATELY. Do not wait for the worker.
+        logger.info(
+            "stop button pressed",
+            extra={"event": "STOP_PRESSED"},
+        )
+        self._turn_in_flight = False
+        try:
+            self._transcript.stop_active_render()
+        except Exception:
+            logger.exception("stop_active_render failed")
         try:
             self._input_row.set_streaming(False)
         except Exception:
@@ -370,27 +399,26 @@ class AzmuthDesktopApp:
         if self._speech_queue is not None:
             await self._speech_queue.cancel_pending()
 
-        try:
-            self._input_row.set_streaming(True)
-        except Exception:
-            pass
+        self._turn_in_flight = True
+        self._post_to_ui(self._sync_streaming_controls)
+
+        async def _noop_delta(_delta: str) -> None:
+            return None
 
         try:
-             try:
-                 reply = await self._controller.send_text(
-                     text, llm_hint=llm_hint
-                 )
-             except asyncio.CancelledError:
-                 logger.info(
-                     "turn cancelled by Stop",
-                     extra={"event": "UI_TURN_CANCELLED"},
-                 )
-                 return
-        finally:
             try:
-                self._input_row.set_streaming(False)
-            except Exception:
-                pass
+                reply = await self._controller.send_text(
+                    text, on_delta=_noop_delta, llm_hint=llm_hint
+                )
+            except asyncio.CancelledError:
+                logger.info(
+                    "turn cancelled by Stop",
+                    extra={"event": "UI_TURN_CANCELLED"},
+                )
+                return
+        finally:
+            self._turn_in_flight = False
+            self._post_to_ui(self._sync_streaming_controls)
 
         if reply and self._always_speak:
             spoken = self._controller.last_spoken_text or reply
@@ -553,9 +581,27 @@ class AzmuthDesktopApp:
 
         fut.add_done_callback(_log_failure)
 
+    def _drain_ui_queue(self) -> None:
+        while True:
+            try:
+                fn = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception:
+                logger.exception("UI queued callback failed")
+        try:
+            self._ui_pump_after_id = self._root.after(15, self._drain_ui_queue)
+        except Exception:
+            self._ui_pump_after_id = None
+
     def _post_to_ui(self, callback, *args: Any) -> None:
         try:
-            self._root.after(0, callback, *args)
+            if args:
+                self._ui_queue.put(lambda: callback(*args))
+            else:
+                self._ui_queue.put(callback)
         except Exception:
             pass
 
@@ -568,6 +614,12 @@ class AzmuthDesktopApp:
 
     # ── Shutdown ───────────────────────────────────────────────────────
     def _on_close(self) -> None:
+        if self._ui_pump_after_id is not None:
+            try:
+                self._root.after_cancel(self._ui_pump_after_id)
+            except Exception:
+                pass
+            self._ui_pump_after_id = None
         if self._reminder_notifier is not None:
             try:
                 self._reminder_notifier.detach()

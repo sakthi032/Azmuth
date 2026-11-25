@@ -231,6 +231,12 @@ class Azmuth:
             response.spoken_text,
         )
 
+    def get_tools_for_llm(
+        self, principal: Principal | None = None
+    ) -> tuple[Any, ...]:
+        """Tools exposed to the LLM (deduplicated reminder tools)."""
+        return self._brain.get_tools_for_llm(principal)
+
     def attach_reminder_delivery(
         self,
         *,
@@ -484,6 +490,36 @@ def build_azmuth(
             )
         except Exception:
             logger.exception("describe_screen registration failed")
+
+        # ---- PC controls ------------------------------------------------
+         # Volume, mute, brightness, lock, shutdown timer, open folder,
+         # open website. All Creator-only via the new capabilities
+         # CONTROL_SYSTEM_STATE (reversible) and CONTROL_POWER (with
+         # confirmation).
+        try:
+            from app.automation.pc_controls import PCController
+            from app.tools.builtin.pc_controls import (
+                LockScreenTool, MuteTool, OpenFolderTool, OpenWebsiteTool,
+                SetBrightnessTool, SetVolumeTool, ShutdownTimerTool,
+            )
+            pc = PCController()
+            for tool in (
+                SetVolumeTool(pc),
+                MuteTool(pc),
+                SetBrightnessTool(pc),
+                LockScreenTool(pc),
+                ShutdownTimerTool(pc),
+                OpenFolderTool(pc),
+                OpenWebsiteTool(pc),
+            ):
+                tool_manager.register(tool)
+            logger.info(
+                "PC control tools registered",
+                extra={"event": "PC_CONTROLS_READY", "count": 7},
+            )
+        except Exception:
+            logger.exception("PC control tools registration failed")
+
 
     # ---- voice -----------------------------------------------------------
     from app.voice.sources import build_audio_source

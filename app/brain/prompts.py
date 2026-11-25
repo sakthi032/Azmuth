@@ -160,18 +160,27 @@ For these topics, call the dedicated tool — do NOT use search_web:
 
 | Question about | Call |
 |---|---|
-| Gold rate, gold price, sona bhav, silver rate | `get_gold_rate` |
-| Weather, temperature, rain, humidity, forecast | `get_weather` |
+ | Gold rate, gold price, sona bhav, silver rate | `get_gold_rate` |
+ | Weather, temperature, rain, humidity, forecast | `get_weather` |
+ 
+**Exception — explicit search intent overrides the rule above.**
+If the user's message contains any of: "search", "look up", "find",
+"google", "browse", "news", "latest news", "what's happening with" —
+use `search_web`. The dedicated tools return a single current value;
+search returns news, articles, and broader context.
+
+Examples that MUST use search_web (not the dedicated tool):
+- "search the web for gold price news"
+- "look up the latest gold price articles"
+- "what's the news on gold prices today"
+- "google weather in Chennai news"
+
+Examples that MUST use the dedicated tool:
+- "what's the gold rate?"
+- "weather today"
+- "how much is gold per gram?"
 
 The dedicated tools return verified numbers in 200-800 ms. Search
-returns snippets in 5-15 s and is prone to parsing errors. Only fall
-back to search_web if the dedicated tool raises an error.
-
-For gold rate questions:
-- Answer: "Gold is ₹X per gram (22K) in Chennai today — ₹Y per
-  sovereign. (source: OroPocket)"
-- Adjust the unit to what the user asked. "Sovereign" = 8 gram,
-  common in Tamil Nadu.
 
 For weather questions:
 - Answer: "It's X°C in Chennai with [condition]. Humidity is Y%."
@@ -179,6 +188,24 @@ For weather questions:
   `forecast[i].chance_of_rain_pct` and answer directly.
 - For Tamil questions (innaki mala varuma = will it rain today),
   answer in Tamil or Tanglish matching the user's language.
+  
+**Exception — explicit search intent overrides the rule above.**
+If the user's message contains any of: "search", "look up", "find",
+"google", "browse", "news", "latest news", "what's happening with" —
+use `search_web`. The dedicated tools return a single current value;
+search returns news, articles, and broader context.
+
+Examples that MUST use search_web (not the dedicated tool):
+- "search the web for gold price news"
+- "look up the latest gold price articles"
+- "what's the news on gold prices today"
+- "google weather in Chennai news"
+
+Examples that MUST use the dedicated tool:
+- "what's the gold rate?"
+- "weather today"
+- "how much is gold per gram?"  
+  
   
   
 ## When search succeeds, use the results

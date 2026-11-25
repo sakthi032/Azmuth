@@ -64,6 +64,39 @@ Never guess — if you cannot identify the target with confidence >= 0.7,
 return found: false."""
 
 
+def _get_gemini_credentials() -> tuple[str | None, str, str]:
+    """Return (api_key, base_url, model).
+
+    Accepts GEMINI_API_KEY or GOOGLE_API_KEY.
+    Ensures the base URL is properly parsed to standard Google Generative Language REST path.
+    """
+    import urllib.parse
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    base_raw = os.getenv("GEMINI_BASE_URL")
+    if not api_key or not base_raw:
+        try:
+            from app.config.settings import load_settings
+            s = load_settings()
+            if not api_key:
+                api_key = s.gemini_api_key
+            if not base_raw:
+                base_raw = s.gemini_base_url
+        except Exception:
+            pass
+
+    if not api_key:
+        return None, "https://generativelanguage.googleapis.com/v1beta", os.getenv("VISION_MODEL", "gemini-flash-lite-latest")
+
+    if not isinstance(base_raw, str):
+        base_raw = str(base_raw or "https://generativelanguage.googleapis.com/v1beta")
+    parsed = urllib.parse.urlparse(base_raw)
+    scheme = parsed.scheme or "https"
+    host = parsed.netloc or "generativelanguage.googleapis.com"
+    base = f"{scheme}://{host}/v1beta"
+    model = os.getenv("VISION_MODEL", "gemini-flash-lite-latest")
+    return api_key, base, model
+
+
 async def ground_target(
     png_bytes: bytes,
     query: str,
@@ -71,17 +104,12 @@ async def ground_target(
     timeout: float = 30.0,
 ) -> VlmTarget | None:
     """Ask the VLM to locate ``query`` in the screenshot."""
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key, base, model = _get_gemini_credentials()
     if not api_key:
         raise ProviderUnavailableError(
             "GEMINI_API_KEY not set — VLM tier unavailable"
         )
 
-    model = os.getenv("VISION_MODEL", "gemini-2.5-flash")
-    base = os.getenv(
-        "GEMINI_BASE_URL",
-        "https://generativelanguage.googleapis.com/v1beta",
-    )
     url = f"{base}/models/{model}:generateContent?key={api_key}"
 
     b64 = base64.b64encode(png_bytes).decode("ascii")
@@ -147,7 +175,7 @@ async def describe_image(
     Returns the raw text answer, or "" if the call fails or the model
     produced nothing. Never raises; callers treat "" as unavailable.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key, base, model = _get_gemini_credentials()
     if not api_key:
         logger.warning(
             "GEMINI_API_KEY not set — describe_image unavailable",
@@ -155,11 +183,6 @@ async def describe_image(
         )
         return ""
 
-    model = os.getenv("VISION_MODEL", "gemini-2.5-flash")
-    base = os.getenv(
-        "GEMINI_BASE_URL",
-        "https://generativelanguage.googleapis.com/v1beta",
-    )
     url = f"{base}/models/{model}:generateContent?key={api_key}"
 
     b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -213,15 +236,10 @@ async def describe_image_detailed(
     quota exceeded, unsupported format, too large, network error, etc.
     ``answer`` is ``""`` on failure.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key, base, model = _get_gemini_credentials()
     if not api_key:
         return "", "GEMINI_API_KEY is not set — vision unavailable"
 
-    model = os.getenv("VISION_MODEL", "gemini-2.5-flash")
-    base = os.getenv(
-        "GEMINI_BASE_URL",
-        "https://generativelanguage.googleapis.com/v1beta",
-    )
     url = f"{base}/models/{model}:generateContent?key={api_key}"
 
     b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -259,19 +277,27 @@ async def describe_image_detailed(
     if r.status_code == 413:
         return "", "image too large for the vision API"
     if r.status_code >= 400:
+        detail_msg = ""
         try:
-            detail = r.json()
+            err_json = r.json()
+            if isinstance(err_json, dict) and "error" in err_json:
+                detail_msg = err_json["error"].get("message", "")
         except Exception:
-            detail = r.text[:300]
+            detail_msg = r.text[:200]
+        if api_key and detail_msg:
+            detail_msg = detail_msg.replace(api_key, "***")
+        err_str = f"vision API HTTP {r.status_code}"
+        if detail_msg:
+            err_str += f": {detail_msg}"
         logger.warning(
             "vlm describe failed",
             extra={
                 "event": "VLM_DESCRIBE_FAILED",
                 "status": r.status_code,
-                "detail": str(detail)[:500],
+                "reason": err_str,
             },
         )
-        return "", f"vision API HTTP {r.status_code}"
+        return "", err_str
 
     try:
         data = r.json()
@@ -281,84 +307,6 @@ async def describe_image_detailed(
         return "", (
             "vision model returned no text — the image may be blank "
             "or the prompt was filtered"
-        )
-
-
-async def describe_image_detailed(
-    image_bytes: bytes,
-    prompt: str,
-    *,
-    timeout: float = 60.0,
-    mime_type: str = "image/jpeg",
-) -> tuple[str, str]:
-    """Like describe_image, but returns (answer, error_reason).
-
-    error_reason is "" on success. On failure it names the exact cause:
-    missing key, quota, unsupported format, too large, etc.
-    """
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return "", "GEMINI_API_KEY is not set — vision unavailable"
-
-    model = os.getenv("VISION_MODEL", "gemini-2.5-flash")
-    base = os.getenv(
-        "GEMINI_BASE_URL",
-        "https://generativelanguage.googleapis.com/v1beta",
-    )
-    url = f"{base}/models/{model}:generateContent?key={api_key}"
-
-    b64 = base64.b64encode(image_bytes).decode("ascii")
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": mime_type, "data": b64}},
-            ]
-        }],
-        "generationConfig": {
-            "temperature": 0.0,
-            "maxOutputTokens": 2048,
-        },
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(url, json=payload)
-    except httpx.TimeoutException:
-        return "", "vision API timed out — try a smaller region or retry"
-    except httpx.RequestError as exc:
-        return "", f"vision network error: {exc}"
-    except Exception as exc:
-        logger.exception("vlm describe request raised")
-        return "", f"vision request failed: {exc}"
-
-    if r.status_code in (401, 403):
-        return "", (
-            f"vision API auth failed (HTTP {r.status_code}) — check "
-            f"GEMINI_API_KEY"
-        )
-    if r.status_code == 429:
-        return "", "vision API quota exceeded — try again later"
-    if r.status_code == 413:
-        return "", "image too large for the vision API"
-    if r.status_code >= 400:
-        logger.warning(
-            "vlm describe failed",
-            extra={
-                "event": "VLM_DESCRIBE_FAILED",
-                "status": r.status_code,
-            },
-        )
-        return "", f"vision API HTTP {r.status_code}"
-
-    try:
-        data = r.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        return str(text), ""
-    except (KeyError, IndexError, TypeError, ValueError):
-        return "", (
-            "vision model returned no text — image may be blank or "
-            "the prompt was filtered"
         )
 
 

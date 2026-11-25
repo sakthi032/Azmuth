@@ -19,6 +19,7 @@ confirmation). Those are *rules*, not decisions.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,7 +28,7 @@ import inspect
 import re
 from app.brain.prompts import build_system_prompt
 from app.brain.context import RuntimeContext
-from app.brain.purpose import detect_purpose
+from app.brain.purpose import detect_purpose, is_vision_query
 from app.brain.tool_calls import ToolCall, parse_tool_calls
 from app.config.logging_setup import get_logger
 from app.core.errors import ProviderUnavailableError
@@ -198,6 +199,19 @@ class Brain:
         self._location_service = location_service
         
         
+    def get_tools_for_llm(
+        self, principal: Principal | None = None
+    ) -> tuple[ToolMetadata, ...]:
+        """Return the tools exposed to the LLM for the given principal.
+
+        Presents ONE reminder-creation tool (schedule_reminder), not both
+        schedule_task and schedule_reminder.
+        """
+        tools = list(self._tools.list_metadata(principal=principal))
+        if any(m.name == "schedule_reminder" for m in tools):
+            tools = [m for m in tools if m.name != "schedule_task"]
+        return tuple(tools)
+
     async def respond(
         self,
         user_input: UserInput,
@@ -251,7 +265,7 @@ class Brain:
         )
 
         # ---- build prompt ------------------------------------------------
-        tools_for_llm = self._tools.list_metadata(principal=principal)
+        tools_for_llm = self.get_tools_for_llm(principal=principal)
         tool_definitions = tuple(
             ToolDefinition(
                 name=m.name,
@@ -420,21 +434,30 @@ class Brain:
         iterations = 0
         used_search = False
 
+        vision_turn = is_vision_query(user_input.text)
         purpose = detect_purpose(user_input.text, language=language_hint)
+        if vision_turn and purpose is ModelPurpose.FAST:
+            purpose = ModelPurpose.CHAT
+        routing_reason = (
+            "vision" if vision_turn
+            else ("has_tools" if tool_definitions else "default")
+        )
         last_model = ""
         last_provider = ""
         loop_guard = LoopGuard()
         loop_aborted = False
         for iteration in range(1, self._max_tool_iterations + 1):
             iterations = iteration
-            if on_delta is not None:
+            if on_delta is not None and not tool_definitions:
                 response = await self._chat_stream_with_fallback(
                     purpose, tuple(messages),
                     tools=tool_definitions, on_delta=on_delta,
+                    routing_reason=routing_reason,
                 )
             else:
                 response = await self._chat_with_fallback(
-                    purpose, tuple(messages), tools=tool_definitions
+                    purpose, tuple(messages), tools=tool_definitions,
+                    routing_reason=routing_reason,
                 )
             last_model = response.model or last_model
             last_provider = response.provider or last_provider
@@ -572,16 +595,14 @@ class Brain:
         )
 
     # -- provider dispatch -------------------------------------------------
-    async def _chat_with_fallback(
+    def _resolve_purpose_and_reason(
         self,
         purpose: ModelPurpose,
-        messages: tuple[Message, ...],
-        tools: tuple[ToolDefinition, ...] = (),
-    ):
-        # Tool-using turns must go to a capable model, not a fast/lightweight one.
-        # FAST → CHAT when tools are present; never send tool calls to FAST tier.
+        tools: tuple[ToolDefinition, ...],
+        routing_reason: str,
+    ) -> tuple[ModelPurpose, str]:
         if tools and purpose is ModelPurpose.FAST:
-            effective_purpose = ModelPurpose.CHAT
+            reason = routing_reason if routing_reason == "vision" else "has_tools"
             logger.info(
                 "upgraded purpose FAST→CHAT for tool-using turn",
                 extra={
@@ -589,10 +610,24 @@ class Brain:
                     "original": "fast",
                     "effective": "chat",
                     "tool_count": len(tools),
+                    "reason": reason,
                 },
             )
-        else:
-            effective_purpose = purpose
+            return ModelPurpose.CHAT, reason
+        return purpose, routing_reason
+
+    async def _chat_with_fallback(
+        self,
+        purpose: ModelPurpose,
+        messages: tuple[Message, ...],
+        tools: tuple[ToolDefinition, ...] = (),
+        routing_reason: str = "default",
+    ):
+        # Tool-using turns must go to a capable model, not a fast/lightweight one.
+        # FAST → CHAT when tools are present; never send tool calls to FAST tier.
+        effective_purpose, reason = self._resolve_purpose_and_reason(
+            purpose, tools, routing_reason
+        )
 
         request = ChatRequest(
             messages=messages,
@@ -601,6 +636,16 @@ class Brain:
         )
 
         if self._llm_router is None:
+            logger.info(
+                "routing turn",
+                extra={
+                    "event": "TURN_ROUTED",
+                    "purpose": effective_purpose.value,
+                    "model": getattr(self._llm, "model", "") or "direct",
+                    "reason": reason,
+                    "native_tools": bool(tools),
+                },
+            )
             return await self._llm.chat(request)
 
         last_exception: Exception | None = None
@@ -617,9 +662,10 @@ class Brain:
                 logger.info(
                     "routing turn",
                     extra={
-                        "event": "BRAIN_ROUTED",
-                        "purpose": purpose.value,
+                        "event": "TURN_ROUTED",
+                        "purpose": effective_purpose.value,
                         "model": spec.name,
+                        "reason": reason,
                         "native_tools": bool(tools),
                     },
                 )
@@ -680,16 +726,12 @@ class Brain:
         messages: tuple[Message, ...],
         tools: tuple[ToolDefinition, ...] = (),
         on_delta: Callable[[str], Awaitable[None] | None] | None = None,
+        routing_reason: str = "default",
     ):
-        """Stream a round. Falls back to non-streaming on any failure.
-
-        Tool-call rounds are buffered and discarded (no on_delta); text
-        rounds are buffered then replayed chunk-by-chunk through on_delta
-        so the UI sees deltas in order.
-        """
-        effective_purpose = purpose
-        if tools and purpose is ModelPurpose.FAST:
-            effective_purpose = ModelPurpose.CHAT
+        """Stream a round. Falls back to non-streaming on any failure."""
+        effective_purpose, reason = self._resolve_purpose_and_reason(
+            purpose, tools, routing_reason
+        )
 
         request = ChatRequest(
             messages=messages,
@@ -698,6 +740,16 @@ class Brain:
         )
 
         if self._llm_router is None:
+            logger.info(
+                "routing turn",
+                extra={
+                    "event": "TURN_ROUTED",
+                    "purpose": effective_purpose.value,
+                    "model": getattr(self._llm, "model", "") or "direct",
+                    "reason": reason,
+                    "native_tools": bool(tools),
+                },
+            )
             try:
                 return await self._stream_one(self._llm, request, on_delta)
             except Exception:
@@ -718,6 +770,16 @@ class Brain:
                 last_exception = exc
                 continue
             try:
+                logger.info(
+                    "routing turn",
+                    extra={
+                        "event": "TURN_ROUTED",
+                        "purpose": effective_purpose.value,
+                        "model": spec.name,
+                        "reason": reason,
+                        "native_tools": bool(tools),
+                    },
+                )
                 response = await self._stream_one(provider, request, on_delta)
                 self._llm_router.record_success(spec)
                 return response
@@ -753,8 +815,7 @@ class Brain:
         request: ChatRequest,
         on_delta: Callable[[str], Awaitable[None] | None] | None,
     ):
-        """Buffer one provider's stream. Replay through on_delta iff no
-        tool_calls were produced."""
+        """Stream one provider's chunks, forwarding text deltas live."""
         buffer: list[str] = []
         tool_calls: list[Any] = []
         model_name = getattr(provider, "model", "") or ""
@@ -771,6 +832,18 @@ class Brain:
             )
             if text and not tool_calls:
                 buffer.append(text)
+                if on_delta is not None:
+                    try:
+                        result = on_delta(text)
+                        if inspect.isawaitable(result):
+                            await result
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception(
+                            "on_delta callback raised",
+                            extra={"event": "BRAIN_ON_DELTA_FAILED"},
+                        )
 
         if tool_calls:
             try:
@@ -783,19 +856,6 @@ class Brain:
             except TypeError:
                 # ChatResponse constructor shape differs; redo non-streaming
                 return await provider.chat(request)
-
-        # Text-only round — replay through on_delta in order
-        if on_delta is not None:
-            for piece in buffer:
-                try:
-                    result = on_delta(piece)
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception:
-                    logger.exception(
-                        "on_delta callback raised",
-                        extra={"event": "BRAIN_ON_DELTA_FAILED"},
-                    )
 
         try:
             return ChatResponse(

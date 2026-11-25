@@ -264,13 +264,23 @@ class UIState:
                 return
 
     def finish_stream(
-        self, entry_id: int, *, final_text: str | None = None
+        self,
+        entry_id: int,
+        *,
+        final_text: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> None:
         """End streaming. Optional ``final_text`` overwrites accumulated text."""
         for i, entry in enumerate(self._conversation):
             if entry.id == entry_id:
                 new_text = final_text if final_text is not None else entry.text
-                self._conversation[i] = replace(entry, text=new_text)
+                self._conversation[i] = replace(
+                    entry,
+                    text=new_text,
+                    model=model if model is not None else entry.model,
+                    provider=provider if provider is not None else entry.provider,
+                )
                 break
         self._streaming_entry_id = None
         self._touch()

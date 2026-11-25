@@ -39,11 +39,11 @@ async def test_stop_cancels_in_flight_turn():
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=2.0)
 
-    texts = [e.text for e in state.conversation]
-    assert any("Stopped" in t for t in texts), texts
     assert controller._current_task is None
-    assert controller.is_busy is False
-
+    assert controller.is_busy is False      
+    # The "Stopped" message is now owned by the UI handler
+    # (_handle_stop in app/ui/app.py). The bridge intentionally does
+    # not add one — see test_stop_button.py::test_no_duplicate_stopped_marker.
 
 def test_reset_conversation_clears_id():
     """reset_conversation is the primitive logout uses to isolate principals."""

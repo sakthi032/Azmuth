@@ -227,8 +227,9 @@ class ToolManager:
                 f"tool {name!r} availability check failed: {exc}"
             ) from exc
         if not available:
+            reason = tool.unavailable_reason()
             raise ProviderUnavailableError(
-                f"tool {name!r} is not available in this environment"
+                reason or f"tool {name!r} is not available in this environment"
             )
 
         # ---- validation --------------------------------------------------

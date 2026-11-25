@@ -231,8 +231,9 @@ class ScreenController:
 
         return FileInfo(
             path=str(path),
-            size_bytes=len(result.png_bytes),
-            created_at=datetime.now(timezone.utc),
+            is_dir=False,
+            size=len(result.png_bytes),
+            modified_at=datetime.now(timezone.utc),
         )
 
 

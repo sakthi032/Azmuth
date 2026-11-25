@@ -279,22 +279,36 @@ def test_openai_compatible_streams_sse_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def sse(payload: dict[str, Any]) -> bytes:
-        return b"data: " + json.dumps(payload).encode("utf-8") + b"\n"
+        return b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
 
     lines = [
         sse({"choices": [{"delta": {"content": "Hel"}}]}),
         sse({"choices": [{"delta": {"content": "lo"}}]}),
         sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
-        b"data: [DONE]\n",
+        b"data: [DONE]\n\n",
     ]
 
     captured: dict[str, Any] = {}
+    import httpx
 
-    def fake_urlopen(req, timeout=None):  # noqa: ANN001
-        captured["body"] = json.loads(req.data.decode("utf-8"))
-        return _FakeHTTPResponse(lines=lines)
+    async def handle_request(req: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(req.content.decode("utf-8"))
+        return httpx.Response(
+            status_code=200,
+            headers={"Content-Type": "text/event-stream"},
+            content=b"".join(lines),
+        )
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    transport = httpx.MockTransport(handle_request)
+    real_async_client = httpx.AsyncClient
+
+    def fake_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "app.llm.providers.openai_compatible.httpx.AsyncClient", fake_client
+    )
 
     provider = OpenAICompatibleProvider(model="m", base_url="http://x/v1")
 

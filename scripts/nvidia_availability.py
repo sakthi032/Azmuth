@@ -17,27 +17,33 @@ from app.config.settings import load_settings
 # the results tell you which to keep in the registry.
 CANDIDATES = [
     # Already known to work
-    "z-ai/glm-5.3",
-    "openai/gpt-oss-20b",
-    # Chat / reasoning alternatives
-    "z-ai/glm-5.3",
-    "z-ai/glm-5.3-flash",
-    "moonshotai/kimi-k3",
-    "moonshotai/kimi-k2.6",
-    "nvidia/nemotron-3-ultra-550b-a55b",
+    "minimaxai/minimax-m3.1-flash",
+    "google/gemma-4-31b-it",
     "nvidia/nemotron-3.5-lightning-30b-a3b",
-    "nvidia/llama-3.1-nemotron-70b-instruct",
-    "mistralai/mistral-large-2-instruct",
-    # Coding alternatives
-    "mistralai/codestral-22b-instruct-v0.1",
-    "deepseek-ai/deepseek-v4.1-flash",
-    "deepseek-ai/deepseek-coder-6.7b-instruct",
-    "meta/codellama-70b",
-    "ibm/granite-34b-code-instruct",
-    "ibm/granite-8b-code-instruct",
-    "bigcode/starcoder2-15b",
-    "qwen/qwen2.5-coder-32b-instruct",
-    "qwen/qwen3-coder-480b-a35b-instruct",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "moonshotai/kimi-k3.1-pro",
+    "nvidia/nemotron-3.5-bolt-e4b",
+    "mistralai/mistral-large-4-1t-a52b",
+    # "openai/gpt-oss-20b",
+    # # Chat / reasoning alternatives
+    # "z-ai/glm-5.3",
+    # "z-ai/glm-5.3-flash",
+    # "moonshotai/kimi-k3",
+    # "moonshotai/kimi-k2.6",
+    # "nvidia/nemotron-3-ultra-550b-a55b",
+    # "nvidia/nemotron-3.5-lightning-30b-a3b",
+    # "nvidia/llama-3.1-nemotron-70b-instruct",
+    # "mistralai/mistral-large-2-instruct",
+    # # Coding alternatives
+    # "mistralai/codestral-22b-instruct-v0.1",
+    # "deepseek-ai/deepseek-v4.1-flash",
+    # "deepseek-ai/deepseek-coder-6.7b-instruct",
+    # "meta/codellama-70b",
+    # "ibm/granite-34b-code-instruct",
+    # "ibm/granite-8b-code-instruct",
+    # "bigcode/starcoder2-15b",
+    # "qwen/qwen2.5-coder-32b-instruct",
+    # "qwen/qwen3-coder-480b-a35b-instruct",
 ]
 
 

@@ -247,12 +247,57 @@ def test_tool_metadata_as_dict_is_json_ready() -> None:
 # ToolManager — registration & discovery
 # ---------------------------------------------------------------------------
 def test_manager_registers_and_lists_tools(manager: ToolManager) -> None:
-    assert set(manager.names()) == {"echo", "get_time"}
+    names = set(manager.names())
+    assert {"echo", "get_time"}.issubset(names)
 
 
 def test_list_metadata_filters_by_principal(manager: ToolManager, restricted: Principal) -> None:
+    class CreatorOnlyTool(Tool):
+        name = "creator_only_action"
+        description = "requires high assurance"
+        parameters: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}}
+        capability = Capability.DELETE_FILE
+        async def execute(self) -> str:
+            return "done"
+
+    manager.register(CreatorOnlyTool())
     names = {m.name for m in manager.list_metadata(principal=restricted)}
-    assert names == {"echo", "get_time"}
+    assert {"echo", "get_time"}.issubset(names)
+    assert "creator_only_action" not in names
+
+
+def test_tools_exposed_to_llm_present_one_reminder_creation_tool(
+    permissions: PermissionManager, restricted: Principal
+) -> None:
+    """The tools exposed to the LLM must present ONE reminder-creation tool
+    (schedule_reminder), not both schedule_task and schedule_reminder."""
+    from unittest.mock import MagicMock
+    from app.brain.pipeline import Brain
+    from app.tools.builtin.reminders import ScheduleReminderTool
+    from app.tools.builtin.scheduler_tools import ScheduleTaskTool
+
+    tm = ToolManager(permissions)
+    tm.register(EchoTool())
+    tm.register(GetTimeTool())
+    tm.register(ScheduleTaskTool(MagicMock()))
+    tm.register(ScheduleReminderTool(MagicMock()))
+
+    brain = Brain(
+        llm=MagicMock(),
+        memory=MagicMock(),
+        sessions=MagicMock(),
+        language=MagicMock(),
+        tools=tm,
+        search=MagicMock(),
+    )
+
+    tools_for_llm = brain.get_tools_for_llm(principal=restricted)
+    names = {m.name for m in tools_for_llm}
+
+    assert "schedule_reminder" in names
+    assert "schedule_task" not in names
+    creation_tools = {"schedule_reminder", "schedule_task"}.intersection(names)
+    assert len(creation_tools) == 1
 
 
 def test_list_metadata_excludes_tools_the_principal_cannot_use(

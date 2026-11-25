@@ -36,13 +36,24 @@ def _install(monkeypatch, **overrides):
 
 
 @pytest.mark.asyncio
-async def test_refuses_when_self_foreground(monkeypatch):
-    _install(monkeypatch, is_self_foreground=lambda: True)
+async def test_captures_previous_window_when_self_foreground(monkeypatch):
+    """A1 behaviour: self-foreground no longer refuses. Capture the
+    last non-self window instead."""
+    _install(monkeypatch)
+    import app.automation.self_guard as sg
+    monkeypatch.setattr(sg, "is_self_foreground", lambda: True)
+    monkeypatch.setattr(
+        sg, "last_non_self_foreground", lambda: (12345, "Editor")
+    )
+    monkeypatch.setattr(sg, "start_foreground_poller", lambda: None)
+    monkeypatch.setattr(
+        su, "_get_window_rect", lambda _h: (0, 0, 100, 100)
+    )
+
     tool = DescribeScreenTool(uia=None)
-    result = await tool.execute(question="what's on my screen")
-    assert "error" in result
-    assert "Azmuth" in result["error"]
-    su.capture_window.assert_not_called()
+    result = await tool.execute(question="what is this")
+    assert "error" not in result
+    su.capture_window.assert_called_once_with(12345)
     su.capture_full_screen.assert_not_called()
 
 
@@ -80,12 +91,18 @@ async def test_selection_region_returns_clear_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_foreground_window(monkeypatch):
+async def test_falls_back_to_full_screen_when_no_foreground(monkeypatch):
+    """A1 behaviour: no foreground window — capture the full desktop
+    rather than erroring."""
     _install(monkeypatch, _get_foreground_hwnd=lambda: 0)
+    import app.automation.self_guard as sg
+    monkeypatch.setattr(sg, "is_self_foreground", lambda: False)
+    monkeypatch.setattr(sg, "start_foreground_poller", lambda: None)
+
     tool = DescribeScreenTool(uia=None)
     result = await tool.execute(question="x")
-    assert "error" in result
-    assert "foreground" in result["error"]
+    assert "error" not in result
+    su.capture_full_screen.assert_called_once()
 
 
 @pytest.mark.asyncio

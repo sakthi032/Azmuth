@@ -52,6 +52,7 @@ class ScriptedLLM(LLMProvider):
 
     def __init__(self, responses: list[str] | str) -> None:
         super().__init__(model="scripted")
+        self._repeat = isinstance(responses, str)
         self._script = [responses] if isinstance(responses, str) else list(responses)
         self.calls: list[ChatRequest] = []
 
@@ -60,7 +61,12 @@ class ScriptedLLM(LLMProvider):
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         self.calls.append(request)
-        text = self._script.pop(0) if self._script else ""
+        if self._script:
+            text = self._script.pop(0)
+            if self._repeat:
+                self._script.append(text)
+        else:
+            text = ""
         return ChatResponse(
             content=text, model="scripted", provider="scripted",
         )
@@ -582,6 +588,20 @@ def test_memory_recall_scoped_to_authenticated_principal(
     reference = next((m for m in messages if "[MEMORY]" in m.content), None)
     assert reference is not None
     assert "dark mode" in reference.content
+
+    # Creator in a new session → recall works across sessions.
+    creator_response_s2 = _run(
+        azmuth.respond(
+            inputs.from_text("dark mode"),
+            conversation_id="session-cross-check",
+            principal=creator,
+        )
+    )
+    assert creator_response_s2.used_memory is True
+    messages_s2 = llm.calls[-1].messages
+    ref_s2 = next((m for m in messages_s2 if "[MEMORY]" in m.content), None)
+    assert ref_s2 is not None
+    assert "dark mode" in ref_s2.content
 
 
 # ---------------------------------------------------------------------------

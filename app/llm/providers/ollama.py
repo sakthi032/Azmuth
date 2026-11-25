@@ -27,6 +27,8 @@ class OllamaProvider(OpenAICompatibleProvider):
     """Ollama's OpenAI-compatible endpoint with model awareness."""
 
     name = "ollama"
+    _last_failed_at: float = 0.0
+    _FAILURE_CACHE_SECONDS: float = 30.0
 
     def __init__(
         self,
@@ -48,15 +50,18 @@ class OllamaProvider(OpenAICompatibleProvider):
 
     # -- availability ------------------------------------------------------
     def is_available(self) -> bool:
-        """Config-only check.
-
-        Whether the daemon is running is discovered at request time,
-        not here. A fast return keeps the router snappy; a genuinely
-        offline Ollama fails the request and the router falls through
-        to whatever tier comes next (there is nothing after tier 3, so
-        the turn reports a clean "all providers failed" error).
-        """
-        return bool(self._base_url) and bool(self._model)
+        """Check whether Ollama is configured and the requested model is pulled."""
+        if not (self._base_url and self._model):
+            return False
+        installed = self._list_installed_models()
+        if installed is None:
+            return False
+        target = self._model
+        return (
+            target in installed
+            or f"{target}:latest" in installed
+            or any(m.split(":")[0] == target for m in installed)
+        )
 
     def _list_installed_models(self) -> set[str] | None:
         """Ask the Ollama daemon which models are pulled.
@@ -66,8 +71,11 @@ class OllamaProvider(OpenAICompatibleProvider):
         Returns ``None`` on any failure; the caller treats that as
         "unavailable".
         """
+        import time
         if self._installed_models is not None:
             return self._installed_models
+        if time.monotonic() - OllamaProvider._last_failed_at < OllamaProvider._FAILURE_CACHE_SECONDS:
+            return None
 
         assert self._base_url is not None
         # Strip the trailing /v1 to reach the native API root.
@@ -80,6 +88,7 @@ class OllamaProvider(OpenAICompatibleProvider):
             with urllib.request.urlopen(url, timeout=2.0) as response:
                 payload = json.loads(response.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            OllamaProvider._last_failed_at = time.monotonic()
             logger.debug(
                 "ollama daemon not reachable",
                 extra={"event": "OLLAMA_UNREACHABLE", "url": url, "reason": str(exc)},
@@ -97,3 +106,4 @@ class OllamaProvider(OpenAICompatibleProvider):
     def refresh_models(self) -> None:
         """Forget the cached model list. Next ``is_available`` re-queries."""
         self._installed_models = None
+        OllamaProvider._last_failed_at = 0.0

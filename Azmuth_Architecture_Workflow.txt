@@ -1,0 +1,236 @@
+# Azmuth Architecture & Full Workflow Analysis
+
+Based on the `main.py` file from the Azmuth 2.0 codebase, here's a comprehensive breakdown of the architecture and end-to-end workflow.
+
+## 📋 Overview
+
+Azmuth is a **Python-based personal AI assistant** with a desktop UI, command-line tools, and a plugin-like tool system. The core is structured around **settings → bootstrap → tool registration → LLM routing → user response**.
+
+---
+
+## 🔧 Core Components
+
+| Component | File/Module | Purpose |
+|---|---|---|
+| **`main.py`** | Entry point | CLI dispatcher; handles `--ui`, `--chat`, `--check-models`, `--debug-tools` |
+| **`bootstrap()`** | `app.config.settings` | Loads config, ensures directories, starts logging |
+| **`Settings`** | `app.config.settings` | Holds environment, log level, languages, LLM provider, search providers |
+| **`build_azmuth(settings)`** | `app.brain` | Creates the central `Azmuth` instance with tools, permissions, authenticator |
+| **`LLMRouter`** | `app.llm.router` | Routes user intent to the correct LLM model/provider |
+| **`Tool Registry`** | `app.brain.tools` | Registers all available tools with capabilities, risk levels, confirmation flags |
+| **`Permissions`** | `app.security` | Filters tools based on user principal & capability requirements |
+| **`UIController`** | `app.ui.bridge` | Bridges CLI/text responses to the desktop UI |
+| **`AzmuthDesktopApp`** | `app.ui.app` | The actual Windows desktop window (Tkinter/CEF based) |
+
+---
+
+## ⚙️ End-to-End Workflow
+
+### 1. **Startup Path**
+
+```text
+py main.py          → CLI entry
+      ↓
+main()            → parses args (--ui, --chat, etc.)
+      ↓
+bootstrap()       → load_settings() → ensure dirs → setup_logging()
+      ↓
+Status printed    → or → _run_ui(settings) / _run_chat(settings) / _run_check_models(settings)
+```
+
+- **`--ui`**: Opens the desktop window (primary interface)
+- **`--chat`**: Developer fallback; text-based chat in terminal
+- **`--check-models`**: Lists all registered LLM models and their availability
+- **`--debug-tools`**: Prints tool filtering analysis (permission/availability pruning)
+
+---
+
+### 2. **Building the Azmuth Brain**
+
+When the UI or chat starts, `build_azmuth(settings)` is called, which:
+
+1. **Builds the tool registry** — loads all registered tools from `app/brain/tools/`
+2. **Sets up the LLM router** — selects the appropriate model based on purpose (e.g., `chat`, `code`, `analysis`)
+3. **Creates the authenticator** — handles PIN-based creator authentication (stored in `creator_credentials.json`)
+4. **Initializes permissions** — checks which tools the current user principal can access
+5. **Sets up the event bus, voice, TTS, scheduler** — for UI integration
+
+**Result**: An `azmuth` object with:
+- `azmuth.tools` — registered tool list
+- `azmuth.permissions` — capability-based access control
+- `azmuth.brain` — LLM reasoning core
+- `azmuth.respond()` / `azmuth.respond_as_text()` — main response methods
+
+---
+
+### 3. **Tool Registration & Filtering**
+
+All tools are registered in the registry with metadata:
+
+| Metadata Field | Description |
+|---|---|
+| `name` | Tool name (e.g., `get_weather`, `search_web`) |
+| `capability` | Required permission (e.g., `pc`, `web`, `vision`) |
+| `risk_level` | `low`, `medium`, `high` (determines `[CONFIRM]` flag) |
+| `requires_confirmation` | Whether runtime confirmation is needed |
+| `is_available()` | Checks if prerequisites (API keys, etc.) are met |
+
+**Filtering happens in 3 stages** (seen in `_run_debug_tools`):
+
+1. **Permission filter** — removes tools the user’s principal isn’t allowed to use
+2. **Availability filter** — removes tools missing required keys/URLs (e.g., `GEMINI_API_KEY` absent → `get_weather`, `get_gold_rate` removed)
+3. **Pruning filter** — deduplication; only tools the LLM actually needs are sent to the model
+
+---
+
+### 4. **LLM Routing & Response**
+
+When a user sends a message:
+
+```text
+user input
+      ↓
+azmuth.respond(user_input)
+      ↓
+1. Classify intent (chat, code, weather, file, etc.)
+      ↓
+2. Select purpose-specific model from router
+      ↓
+3. Choose tools for the job → `azmuth.get_tools_for_llm(principal=principal)`
+      ↓
+4. Run LLM with: "Here are {n} tools. Solve the user's request."
+      ↓
+5. LLM returns: tool calls OR text response
+      ↓
+6. If tool calls: execute tools → gather results → feed back to LLM → final answer
+      ↓
+7. Return text to user (via UI or chat terminal)
+```
+
+**Tool categories** (from the `expect` dict in `_run_debug_tools`):
+
+| Category | Tools |
+|---|---|
+| `screen` | `describe_screen` |
+| `vision` | `read_document`, `ask_document`, `describe_image` |
+| `reminder` | `schedule_reminder`, `cancel_reminder`, etc. |
+| `pc` | `set_volume`, `mute`, `set_brightness`, `lock_screen`, etc. |
+| `web` | `search_web`, `summarize_current_tab` |
+| `notes`, `todo`, `briefing` | Note-taking and task management |
+
+---
+
+### 5. **Environment Variable Handling (`GEMINI_API_KEY`)**
+
+This is critical for the vision/model tools:
+
+1. **`Settings.load_settings()`** reads `GEMINI_API_KEY` from the environment (User or System variable in Windows)
+2. **`build_azmuth(settings)`** passes settings to the router and tool registry
+3. **`tool.is_available()`** checks if `GEMINI_API_KEY` is set and non-empty
+4. If missing → tools like `get_weather`, `get_gold_rate`, `read_document` (vision), `ask_document` are **filtered out** by the availability step
+5. **User action**: Set `GEMINI_API_KEY` as a Windows User variable, then **fully restart Azmuth** so it re-reads the environment
+
+> **Note from the code**: `main.py` itself doesn't set the key — it's expected to already exist in the environment. The `--debug-tools` output shows which tools are filtered out by `is_available() == False`.
+
+---
+
+### 6. **UI Flow (when `--ui` is used)**
+
+```text
+py main.py --ui
+      ↓
+_run_ui(settings)
+      ↓
+1. build_language_manager(settings) → Tamil/English/Tanglish support
+      ↓
+2. build_azmuth(settings) → brain with tools
+      ↓
+3. Load/create creator PIN (first-run prompt)
+      ↓
+4. asyncio.run(azmuth.startup())
+      ↓
+5. Create AzmuthDesktopApp with:
+   - controller (UI bridge)
+   - brain (azmuth.brain)
+   - voice (text-to-speech / input)
+   - tts (voice output)
+   - event_bus (internal messaging)
+   - scheduler (reminders/tasks)
+      ↓
+6. app.run() → main event loop
+      ↓
+7. User types → `responder(user_input, ...)` → `azmuth.respond_as_text()`
+```
+
+The UI window is the **"real brain"** — all text goes through `azmuth.respond_as_text()`, which does the full tool-selection → LLM → execution pipeline.
+
+---
+
+### 7. **Reminder/Task Scheduling**
+
+- `schedule_reminder(when_text, message)` — stores tasks in a scheduler
+- `list_scheduled_tasks()` — lists all active reminders
+- `cancel_scheduled_task(task_id)` — cancels by UUID
+- The scheduler is passed to `AzmuthDesktopApp` and runs in the background
+
+---
+
+### 8. **Security & Creator PIN**
+
+- On first launch, if `creator_credentials.json` has no PIN, the console prompts: *"Choose a PIN (min 4 digits)"*
+- The PIN is hashed and registered with the `Authenticator`
+- The PIN protects **creator-level actions** (settings changes, possibly tool access)
+- Without a valid PIN, some advanced features may be locked
+
+---
+
+## 🧩 How Everything Connects
+
+```
+CLI (main.py)
+       │
+       ├───> --ui → AzmuthDesktopApp (GUI window)
+       │           │
+       │           └──> responder() → azmuth.respond_as_text()
+       │                       │
+       │                       ├──> classify intent
+       │                       ├──> select LLM model (router)
+       │                       ├──> get_tools_for_llm(principal)
+       │                       ├──> execute tool calls
+       │                       └──> return text to user
+       │
+       ├───> --chat → terminal-based chat loop
+       │
+       ├───> --check-models → list all LLM models + availability
+       │
+       └──> --debug-tools → tool filtering analysis
+                             (perm filter → avail filter → prune filter)
+
+                           │
+                           ▼
+                Settings (env, languages, LLM provider)
+                                   │
+                                   ▼
+                GEMINI_API_KEY (User env var)
+                                   │
+                                   ▼
+                Tool availability check
+                                   │
+                                   ▼
+                Only available tools sent to LLM
+```
+
+---
+
+## 🎯 Key Takeaways
+
+1. **`GEMINI_API_KEY` is the single most critical env var** — without it, vision/document tools are disabled.
+2. **Restart Azmuth after adding the key** — apps only read env vars at startup.
+3. **Tool availability is dynamic** — filtered by permission, then by whether keys are present, then by LLM pruning.
+4. **The UI is just a window** — all reasoning happens in the `azmuth` brain object; the UI merely sends text and displays results.
+5. **Three filtering stages** ensure the LLM only sees tools it can actually use safely.
+6. **PIN-based creator auth** is the only console interaction in the UI path.
+
+---
+
+*Analysis generated from Azmuth 2.0 codebase structure.*

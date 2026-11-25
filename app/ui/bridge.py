@@ -121,10 +121,19 @@ class UIController:
         unwinds immediately even if the underlying HTTP call is in a
         worker thread.
         """
+        active_turn_id = self._turn_id
         self._turn_id += 1
         task = self._current_task
+        logger.info(
+            "turn cancel requested",
+            extra={"event": "TURN_CANCEL_REQUESTED", "turn_id": active_turn_id},
+        )
         if task is not None and not task.done():
             task.cancel()
+            logger.info(
+                "turn cancelled",
+                extra={"event": "TURN_CANCELLED", "turn_id": active_turn_id},
+            )
 
     def set_confirmer(self, confirmer: Confirmer | None) -> None:
         self._confirmer = confirmer
@@ -219,6 +228,14 @@ class UIController:
                     # Only this turn owns the message; Stop button
                     # already added one synchronously if it fired.
                     self._state.add_system_message("\u23f9 Stopped")
+                logger.info(
+                    "turn finalized",
+                    extra={
+                        "event": "UI_TURN_FINALIZED",
+                        "turn_id": my_turn_id,
+                        "outcome": "cancelled",
+                    },
+                )
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
@@ -229,18 +246,39 @@ class UIController:
                 self._state.add_system_message(
                     f"Error: {exc}", level=LogLevel.ERROR
                 )
+                logger.info(
+                    "turn finalized",
+                    extra={
+                        "event": "UI_TURN_FINALIZED",
+                        "turn_id": my_turn_id,
+                        "outcome": "error",
+                    },
+                )
                 return ""
 
             reply, session_id, model, provider, spoken_text = _unpack_result(raw)
             if my_turn_id != self._turn_id:
                 # Stop was pressed while responder was completing — drop
+                logger.info(
+                    "turn finalized",
+                    extra={
+                        "event": "UI_TURN_FINALIZED",
+                        "turn_id": my_turn_id,
+                        "outcome": "dropped_stale",
+                    },
+                )
                 return ""
             self._last_spoken_text = spoken_text
 
             if session_id:
                 self._conversation_id = session_id
             if streaming_id is not None:
-                self._state.finish_stream(streaming_id, final_text=reply)
+                self._state.finish_stream(
+                    streaming_id,
+                    final_text=reply,
+                    model=model,
+                    provider=provider,
+                )
             elif reply:
                 self._state.add_assistant_message(
                     reply,
@@ -249,6 +287,15 @@ class UIController:
                     model=model,
                     provider=provider,
                 )
+            logger.info(
+                "turn finalized",
+                extra={
+                    "event": "UI_TURN_FINALIZED",
+                    "turn_id": my_turn_id,
+                    "model": model,
+                    "outcome": "completed",
+                },
+            )
             return reply
         finally:
             self._busy = False

@@ -20,7 +20,7 @@ from typing import Any
 
 from app.config.logging_setup import get_logger
 from app.config.settings import Settings
-from app.core.errors import MemoryStoreError
+from app.core.errors import MemoryStoreError, ProviderUnavailableError
 from app.memory.backends.base import MemoryBackend
 from app.memory.backends.sqlite_backend import SqliteMemoryBackend
 from app.memory.models import MemoryKind, MemoryRecord, new_memory_id
@@ -382,6 +382,13 @@ def _build_vectors(settings: Settings) -> VectorStore | None:
             if not store.is_available():
                 return None
             return store
+        except ProviderUnavailableError as exc:
+            logger.warning(
+                "chroma vector store unavailable: %s",
+                exc,
+                extra={"event": "VECTOR_STORE_UNAVAILABLE"},
+            )
+            return None
         except Exception:
             logger.exception(
                 "failed to build chroma vector store",
@@ -418,24 +425,40 @@ def build_memory_manager(
         backend_name = (settings.memory_backend or "sqlite").lower()
 
         if backend_name == "postgres":
-            from app.memory.backends.postgres_backend import PostgresMemoryBackend
+            try:
+                from app.memory.backends.postgres_backend import PostgresMemoryBackend
 
-            backend = PostgresMemoryBackend(
-                host=settings.postgres_host,
-                port=settings.postgres_port,
-                database=settings.postgres_database,
-                user=settings.postgres_user,
-                password=settings.postgres_password,
-                schema=settings.postgres_schema,
-            )
-            logger.info(
-                "memory backend initialised",
-                extra={
-                    "event": "MEMORY_BACKEND_READY",
-                    "backend": "postgres",
-                    "database": settings.postgres_database,
-                },
-            )
+                backend = PostgresMemoryBackend(
+                    host=settings.postgres_host,
+                    port=settings.postgres_port,
+                    database=settings.postgres_database,
+                    user=settings.postgres_user,
+                    password=settings.postgres_password,
+                    schema=settings.postgres_schema,
+                )
+                logger.info(
+                    "memory backend initialised",
+                    extra={
+                        "event": "MEMORY_BACKEND_READY",
+                        "backend": "postgres",
+                        "database": settings.postgres_database,
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "postgres backend failed (%s); falling back to sqlite",
+                    exc,
+                    extra={"event": "MEMORY_BACKEND_FALLBACK", "reason": str(exc)},
+                )
+                backend = SqliteMemoryBackend(settings.memory_database)
+                logger.info(
+                    "memory backend initialised",
+                    extra={
+                        "event": "MEMORY_BACKEND_READY",
+                        "backend": "sqlite",
+                        "path": str(settings.memory_database),
+                    },
+                )
         elif backend_name == "sqlite":
             backend = SqliteMemoryBackend(settings.memory_database)
             logger.info(

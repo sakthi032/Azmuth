@@ -14,7 +14,7 @@ import uuid
 from typing import Any
 
 from app.config.logging_setup import get_logger
-from app.core.errors import AutomationError
+from app.core.errors import AutomationError, ProviderUnavailableError
 
 logger = get_logger("automation.chrome_bridge")
 
@@ -22,7 +22,10 @@ _PORT = 9280
 
 
 def _get_serve():
-    import websockets
+    try:
+        import websockets
+    except ImportError as exc:
+        raise ProviderUnavailableError("websockets is not installed") from exc
     try:
         from websockets.asyncio.server import serve as new_serve
         return new_serve
@@ -116,7 +119,14 @@ class ChromeBridge:
             self._loop.run_until_complete(self._serve())
         except Exception as exc:  # noqa: BLE001
             self._bind_error = str(exc)
-            logger.exception("bridge loop failed")
+            if isinstance(exc, ProviderUnavailableError):
+                logger.info(
+                    "chrome bridge unavailable: %s",
+                    exc,
+                    extra={"event": "CHROME_BRIDGE_UNAVAILABLE"},
+                )
+            else:
+                logger.exception("bridge loop failed")
 
     async def _serve(self) -> None:
         serve = _get_serve()

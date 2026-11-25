@@ -52,3 +52,22 @@ def test_no_unexpected_format_fields():
         f"Unescaped format fields not supplied by build_system_prompt: "
         f"{sorted(unexpected)}. Escape them as {{{{ and }}}}."
     )
+
+def test_search_intent_overrides_dedicated_tools():
+    """Reproduces bug 8: 'search the web for gold price news' called
+    get_gold_rate instead of search_web. Prompt must carve out an
+    exception when the user explicitly says search/find/news."""
+    prompt = build_system_prompt(language="en", tools=())
+    lower = prompt.lower()
+    # Must contain an exception clause near the dedicated-tools rule
+    # ("if the user says search...")
+    anchor = lower.find("prefer dedicated tools over search")
+    assert anchor >= 0, "prefer-dedicated section missing"
+    region = lower[anchor:anchor + 800]
+    assert (
+        "search" in region
+        and ("exception" in region or "override" in region or "instead" in region)
+    ), (
+        "Prefer-dedicated-tools section must carve out an exception for "
+        "explicit search/news/find requests."
+    )

@@ -156,5 +156,67 @@ async def test_cancel_in_flight_terminates_send_text():
 
     assert was_cancelled is True
     assert controller._current_task is None
+    assert controller.is_busy is False
+
+
+@pytest.mark.asyncio
+async def test_ui_controller_stop_has_exactly_one_stopped_marker_and_no_late_deltas():
+    """UI controller-level test: transcript gets EXACTLY ONE 'Stopped' marker,
+    UI resets within 2 seconds, and no late deltas appear from the stopped turn."""
+    import time
+    from app.ui.bridge import UIController
+    from app.ui.state import UIState
+
+    state = UIState()
+    lm = MagicMock()
+    lm.resolve_response_language = lambda t, session_language=None: "en"
+
+    started = asyncio.Event()
+    late_delta_succeeded = False
+
+    async def streaming_responder(user_input, conversation_id, confirmer, on_delta=None):
+        started.set()
+        try:
+            if on_delta:
+                await on_delta("first valid chunk")
+            await asyncio.sleep(10.0)
+            return "never", "s", "m", "p", ""
+        except asyncio.CancelledError:
+            # Attempt to send a late delta after cancellation was initiated
+            if on_delta:
+                try:
+                    await on_delta("late chunk after stop")
+                    nonlocal late_delta_succeeded
+                    late_delta_succeeded = True
+                except asyncio.CancelledError:
+                    pass
+            raise
+
+    controller = UIController(
+        language=lm, responder=streaming_responder, state=state,
+    )
+
+    t0 = time.monotonic()
+    task = asyncio.create_task(controller.send_text("test query", on_delta=lambda d: None))
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    # UI stop interaction: UI handler records the stop marker and triggers cancel_in_flight
+    state.add_system_message("\u23f9 Stopped")
+    controller.cancel_in_flight()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2.0)
+
+    reset_time = time.monotonic() - t0
+    assert reset_time < 2.0, f"UI took {reset_time:.2f}s to reset (must be < 2s)"
+    assert controller.is_busy is False
+    assert controller._current_task is None
+
+    # Assert EXACTLY ONE "Stopped" marker exists in the transcript
     texts = [e.text for e in state.conversation]
-    assert any("Stopped" in t for t in texts)
+    stopped_markers = [t for t in texts if "Stopped" in t]
+    assert len(stopped_markers) == 1, f"Expected exactly 1 Stopped marker, found: {stopped_markers}"
+
+    # Verify no late deltas appeared
+    assert late_delta_succeeded is False
+    assert not any("late chunk" in t for t in texts)

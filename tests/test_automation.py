@@ -289,8 +289,35 @@ def test_windows_automation_availability_follows_platform() -> None:
 
 def test_screenshot_raises_provider_unavailable(tmp_path: Path) -> None:
     impl = _impl_with_sandbox(tmp_path)
+    impl._screen._available = False
     with pytest.raises(ProviderUnavailableError, match="screenshot"):
         _run(impl.take_screenshot(str(tmp_path / "shot.png")))
+
+
+def test_take_screenshot_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.automation.screen import CaptureResult
+    import app.automation.screen as screen_mod
+
+    impl = _impl_with_sandbox(tmp_path)
+    impl._screen._available = True
+    dest = tmp_path / "shot.png"
+    fake_png = b"\x89PNG\r\n\x1a\nfake_image_bytes"
+
+    async def _mock_capture(save_to: Path | None = None) -> CaptureResult:
+        return CaptureResult(
+            path=save_to,
+            width=1920,
+            height=1080,
+            png_bytes=fake_png,
+        )
+
+    monkeypatch.setattr(screen_mod, "capture_full_screen", _mock_capture)
+    info = _run(impl.take_screenshot(str(dest)))
+
+    assert info.path == str(dest)
+    assert info.is_dir is False
+    assert info.size == len(fake_png)
+    assert info.modified_at is not None
 
 class _RecordingInput:
     """Wraps InputController to record calls without sending real input.

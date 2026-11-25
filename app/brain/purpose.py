@@ -105,6 +105,18 @@ _FAST_PHRASES: tuple[str, ...] = (
     "tl;dr", "tldr",
 )
 
+#: Vision / screen-understanding phrases — these always need CHAT/vision
+#: capability; never route to FAST even when short.
+_VISION_PHRASES: tuple[str, ...] = (
+    "on my screen", "on the screen", "my screen", "the screen",
+    "describe the screen", "describe_screen", "what do you see",
+    "read the screen", "look at my screen", "what's on", "what is on",
+    "screenshot", "screen capture", "screen content",
+    "describe image", "describe the image", "what's in the image",
+    "read the image", "in this image", "in this picture",
+    "in this screenshot",
+)
+
 #: Tamil/Tanglish coding intents.
 _TAMIL_CODING: tuple[str, ...] = (
     "code ezhuthu", "code pannu", "function ezhuthu",
@@ -143,6 +155,10 @@ def detect_purpose(
     # ---- CODING (strongest signal) --------------------------------------
     if _looks_like_coding(text, lowered):
         return ModelPurpose.CODING
+
+    # ---- VISION / SCREEN (must not fall through to FAST) ----------------
+    if _looks_like_vision(lowered):
+        return ModelPurpose.CHAT
 
     # ---- FAST (short simple queries checked before the math regex) ------
     if _looks_like_fast(text, lowered):
@@ -204,6 +220,15 @@ def _looks_like_reasoning(lowered: str) -> bool:
     return False
 
 
+def _looks_like_vision(lowered: str) -> bool:
+    """Return True when the query is about screen/image content.
+
+    These require vision capability and must never be downgraded to FAST,
+    even when the message is very short (e.g. "what is on my screen?").
+    """
+    return any(phrase in lowered for phrase in _VISION_PHRASES)
+
+
 def _looks_like_fast(text: str, lowered: str) -> bool:
     # Length is a hard disqualifier. A "quick question" that fills a
     # screen is a real question, not a fast lookup.
@@ -239,4 +264,11 @@ def _has_word(word: str, text: str) -> bool:
     return re.search(rf"\b{re.escape(word)}\b", text) is not None
 
 
-__all__ = ["detect_purpose"]
+def is_vision_query(text: str) -> bool:
+    """Return True if ``text`` appears to require vision / screen inspection."""
+    if not text:
+        return False
+    return _looks_like_vision(text.lower())
+
+
+__all__ = ["detect_purpose", "is_vision_query"]

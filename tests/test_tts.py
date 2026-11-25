@@ -416,9 +416,28 @@ def test_custom_azmuth_voice_is_expressible_as_a_profile() -> None:
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
-def test_default_registry_contains_only_null() -> None:
+def test_default_registry_contains_edge_tts_and_null() -> None:
     registry = build_tts_registry()
-    assert registry.names() == ("null",)
+    assert set(registry.names()) == {"edge_tts", "null"}
+
+
+def test_edge_tts_import_and_registry_build_performs_no_network_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registering edge_tts performs no network I/O at import or registry build time."""
+    import socket
+
+    def explode_connect(self, *args, **kwargs):
+        raise AssertionError("Network I/O occurred during import or registry build!")
+
+    monkeypatch.setattr(socket.socket, "connect", explode_connect)
+
+    import importlib
+    import app.voice.tts as tts_module
+
+    importlib.reload(tts_module)
+    registry = tts_module.build_tts_registry()
+    assert set(registry.names()) == {"edge_tts", "null"}
 
 
 def test_registry_can_be_extended_at_runtime() -> None:

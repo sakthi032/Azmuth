@@ -16,8 +16,9 @@ from __future__ import annotations
 import re
 import tkinter as tk
 from tkinter import ttk
+from typing import Callable
 
-from app.ui.state import Speaker, UIState
+from app.ui.state import LogLevel, Speaker, UIState
 from app.tasks.time_parser import IST
 
 # ── Palette ──────────────────────────────────────────────────────────
@@ -62,9 +63,16 @@ _STREAM_DELAY_NEWLINE = 22
 class TranscriptView(tk.Frame):
     """Scrollable conversation transcript with typewriter streaming."""
 
-    def __init__(self, parent: tk.Widget, state: UIState) -> None:
+    def __init__(
+        self,
+        parent: tk.Widget,
+        state: UIState,
+        *,
+        on_stream_active_change: Callable[[bool], None] | None = None,
+    ) -> None:
         super().__init__(parent, bg=_BG)
         self._state = state
+        self._on_stream_active_change = on_stream_active_change
         self._last_rendered_id = 0
         self._block_counter = 0
         self._code_blocks: dict[str, str] = {}
@@ -115,6 +123,42 @@ class TranscriptView(tk.Frame):
         self._cancel_thinking_timer()
         self._cancel_stream_timer()
         super().destroy()
+
+    @property
+    def is_streaming(self) -> bool:
+        return self._streaming
+
+    @property
+    def is_thinking(self) -> bool:
+        return self._thinking_active
+
+    def _notify_stream_active(self, active: bool) -> None:
+        if self._on_stream_active_change is not None:
+            try:
+                self._on_stream_active_change(active)
+            except Exception:
+                pass
+
+    def stop_active_render(self) -> None:
+        """Stop thinking spinner and/or typewriter streaming, keeping partial
+        text and finalizing with a meta footer."""
+        self._hide_thinking()
+        if not self._streaming:
+            return
+        self._streaming = False
+        self._cancel_stream_timer()
+        entry = self._stream_entry
+        self._stream_entry = None
+        self._stream_units = []
+        if entry is not None:
+            self._text.configure(state="normal")
+            last_char = self._text.get("end - 2c", "end - 1c")
+            if last_char and last_char != "\n":
+                self._text.insert("end", "\n", ("body_azmuth",))
+            self._render_meta(entry)
+            self._text.configure(state="disabled")
+            self._text.see("end")
+        self._notify_stream_active(False)
 
     # ── Tags ───────────────────────────────────────────────────────────
     def _configure_tags(self) -> None:
@@ -225,7 +269,7 @@ class TranscriptView(tk.Frame):
             self._render_entry(entry)
             self._last_rendered_id = entry.id
 
-    def _render_entry(self, entry) -> None:
+    def _render_entry(self, entry, *, pos: str = "end") -> None:
         self._clear_welcome()
 
         label = {Speaker.USER: "You",
@@ -241,13 +285,28 @@ class TranscriptView(tk.Frame):
             body_tag = "body_error"
 
         self._text.configure(state="normal")
-        self._text.insert("end", f"{label}\n", (name_tag,))
-        self._render_markdown(entry.text, body_tag)
-        self._render_meta(entry)
+        self._text.insert(pos, f"{label}\n", (name_tag,))
+        self._render_markdown(entry.text, body_tag, pos=pos)
+        self._render_meta(entry, pos=pos)
         self._text.configure(state="disabled")
         self._text.see("end")
 
-    def _render_meta(self, entry) -> None:
+    def _render_entry_at(self, entry, start_mark: str) -> None:
+        """Render ``entry`` in-place at ``start_mark`` without disturbing later lines."""
+        pos_mark = "_render_pos"
+        self._text.configure(state="normal")
+        self._text.mark_set(pos_mark, start_mark)
+        self._text.mark_gravity(pos_mark, "right")
+        self._text.configure(state="disabled")
+        try:
+            self._render_entry(entry, pos=pos_mark)
+        finally:
+            try:
+                self._text.mark_unset(pos_mark)
+            except tk.TclError:
+                pass
+
+    def _render_meta(self, entry, *, pos: str = "end") -> None:
         created = entry.created_at
         if created.tzinfo is None:
             # Timestamps are stored naive; treat them as UTC.
@@ -262,7 +321,7 @@ class TranscriptView(tk.Frame):
             meta_parts.append(entry.model)
         if entry.provider:
             meta_parts.append(f"[{entry.provider}]")
-        self._text.insert("end",
+        self._text.insert(pos,
             "   \u00b7   ".join(meta_parts) + "\n", ("meta",))
 
     # ── Typewriter streaming ───────────────────────────────────────────
@@ -294,6 +353,7 @@ class TranscriptView(tk.Frame):
         self._stream_chars_done = 0
         self._stream_entry = entry
         self._stream_name_start = name_start
+        self._notify_stream_active(True)
         self._tick_stream()
 
     def _build_stream_units(
@@ -447,7 +507,9 @@ class TranscriptView(tk.Frame):
         self._streaming = False
         self._cancel_stream_timer()
         entry = self._stream_entry
+        self._stream_entry = None
         if entry is None:
+            self._notify_stream_active(False)
             return
 
         # Delete the streamed text (from name line to end)
@@ -457,6 +519,7 @@ class TranscriptView(tk.Frame):
 
         # Re-render the entry with full markdown + code bindings + meta
         self._render_entry(entry)
+        self._notify_stream_active(False)
 
     def _finish_stream_immediately(self) -> None:
         """Cancel streaming and render the full entry right now."""
@@ -465,7 +528,9 @@ class TranscriptView(tk.Frame):
         self._streaming = False
         self._cancel_stream_timer()
         entry = self._stream_entry
+        self._stream_entry = None
         if entry is None:
+            self._notify_stream_active(False)
             return
         # Delete streamed text
         self._text.configure(state="normal")
@@ -473,6 +538,7 @@ class TranscriptView(tk.Frame):
         self._text.configure(state="disabled")
         # Full render
         self._render_entry(entry)
+        self._notify_stream_active(False)
 
     def _cancel_stream_timer(self) -> None:
         if self._stream_after_id is not None:
@@ -537,7 +603,7 @@ class TranscriptView(tk.Frame):
             self._text.configure(state="disabled")
 
     # ── Markdown ───────────────────────────────────────────────────────
-    def _render_markdown(self, text: str, base_tag: str) -> None:
+    def _render_markdown(self, text: str, base_tag: str, *, pos: str = "end") -> None:
         lines = text.split("\n")
         i = 0
         while i < len(lines):
@@ -553,66 +619,66 @@ class TranscriptView(tk.Frame):
                     i += 1
                 if i < len(lines):
                     i += 1
-                self._render_code_block(lang, "\n".join(code_lines))
+                self._render_code_block(lang, "\n".join(code_lines), pos=pos)
                 continue
 
             m = _HEADER.match(line)
             if m:
                 level = len(m.group(1))
                 tag = {1: "h1", 2: "h2", 3: "h3", 4: "h4"}.get(level, "h4")
-                self._insert_inline(m.group(2), base_tag, extra=tag)
-                self._text.insert("end", "\n")
+                self._insert_inline(m.group(2), base_tag, extra=tag, pos=pos)
+                self._text.insert(pos, "\n")
                 i += 1
                 continue
 
             m = _BULLET.match(line)
             if m:
-                self._text.insert("end", "  \u2022  ", (base_tag, "bullet"))
-                self._insert_inline(m.group(2), base_tag, extra="bullet")
-                self._text.insert("end", "\n")
+                self._text.insert(pos, "  \u2022  ", (base_tag, "bullet"))
+                self._insert_inline(m.group(2), base_tag, extra="bullet", pos=pos)
+                self._text.insert(pos, "\n")
                 i += 1
                 continue
 
             m = _NUMBERED.match(line)
             if m:
-                self._text.insert("end", f"  {m.group(2)}.  ",
+                self._text.insert(pos, f"  {m.group(2)}.  ",
                                   (base_tag, "numbered"))
-                self._insert_inline(m.group(3), base_tag, extra="numbered")
-                self._text.insert("end", "\n")
+                self._insert_inline(m.group(3), base_tag, extra="numbered", pos=pos)
+                self._text.insert(pos, "\n")
                 i += 1
                 continue
 
             m = _QUOTE.match(line)
             if m:
-                self._text.insert("end", "\u258e  ", (base_tag, "quote"))
-                self._insert_inline(m.group(1), base_tag, extra="quote")
-                self._text.insert("end", "\n")
+                self._text.insert(pos, "\u258e  ", (base_tag, "quote"))
+                self._insert_inline(m.group(1), base_tag, extra="quote", pos=pos)
+                self._text.insert(pos, "\n")
                 i += 1
                 continue
 
-            self._insert_inline(line, base_tag)
-            self._text.insert("end", "\n")
+            self._insert_inline(line, base_tag, pos=pos)
+            self._text.insert(pos, "\n")
             i += 1
 
     def _insert_inline(self, line: str, base_tag: str,
-                       extra: str | None = None) -> None:
+                       extra: str | None = None, *, pos: str = "end") -> None:
         for text, style in _tokenize_inline(line):
             tags: list[str] = [base_tag]
             if extra:
                 tags.append(extra)
             if style:
                 tags.append(style)
-            self._text.insert("end", text, tuple(tags))
+            self._text.insert(pos, text, tuple(tags))
 
     # ── Code blocks ────────────────────────────────────────────────────
-    def _render_code_block(self, lang: str, code: str) -> None:
+    def _render_code_block(self, lang: str, code: str, *, pos: str = "end") -> None:
         self._block_counter += 1
         block_id = f"codeblock_{self._block_counter}"
         header_id = f"codeheader_{self._block_counter}"
         self._code_blocks[block_id] = code
 
         header_text = f"  \u2398  {lang}   \u00b7   click to copy\n"
-        self._text.insert("end", header_text, (header_id, "code_header"))
+        self._text.insert(pos, header_text, (header_id, "code_header"))
         self._text.tag_bind(
             header_id, "<Button-1>",
             lambda _e, b=block_id, h=header_id: self._copy_block(b, h))
@@ -624,9 +690,9 @@ class TranscriptView(tk.Frame):
             lambda _e: self._text.configure(cursor="xterm"))
 
         for line in code.split("\n"):
-            self._text.insert("end", "  " + line + "\n",
+            self._text.insert(pos, "  " + line + "\n",
                               (block_id, "code_block"))
-        self._text.insert("end", "\n", ("code_block",))
+        self._text.insert(pos, "\n", ("code_block",))
 
     def _copy_block(self, block_id: str, header_id: str) -> None:
         content = self._code_blocks.get(block_id, "")
@@ -654,53 +720,77 @@ class TranscriptView(tk.Frame):
             )
             if entry is not None:
                 if streaming_id not in self._stream_entries:
+                    self._hide_thinking()
                     self._clear_welcome()
+                    start_mark = f"stream_start_{streaming_id}"
+                    end_mark = f"stream_end_{streaming_id}"
                     self._text.configure(state="normal")
-                    self._text.insert("end", "Azmuth\n", ("name_azmuth",))
-                    start = self._text.index("end - 1c")
+                    insert_pos = self._text.index("end - 1c")
+                    self._text.mark_set(start_mark, insert_pos)
+                    self._text.mark_gravity(start_mark, "left")
+                    self._text.mark_set(end_mark, insert_pos)
+                    self._text.mark_gravity(end_mark, "right")
+                    self._text.insert(end_mark, "Azmuth\n", ("name_azmuth",))
+                    self._text.mark_gravity(end_mark, "left")
                     self._text.configure(state="disabled")
                     self._stream_entries[streaming_id] = {
-                        "start": start, "text": "",
+                        "start_mark": start_mark,
+                        "end_mark": end_mark,
+                        "text": "",
                     }
-                    self._last_rendered_id = entry.id
+                    self._last_rendered_id = max(self._last_rendered_id, entry.id)
                 tracked = self._stream_entries[streaming_id]
                 delta = entry.text[len(tracked["text"]):]
                 if delta:
+                    end_mark = tracked["end_mark"]
                     self._text.configure(state="normal")
-                    self._text.insert("end", delta, ("body_azmuth",))
+                    self._text.mark_gravity(end_mark, "right")
+                    self._text.insert(end_mark, delta, ("body_azmuth",))
+                    self._text.mark_gravity(end_mark, "left")
                     self._text.configure(state="disabled")
                     self._text.see("end")
                     tracked["text"] = entry.text
 
-        # ── Stream finished — re-render with markdown ──
+        # ── Stream finished — re-render with markdown + meta footer ──
         if streaming_id is None and self._stream_entries:
             for entry_id, tracked in list(self._stream_entries.items()):
                 final_entry = next(
                     (e for e in state.conversation if e.id == entry_id), None
                 )
+                start_mark = tracked["start_mark"]
+                end_mark = tracked["end_mark"]
                 if final_entry is not None:
                     self._text.configure(state="normal")
-                    self._text.delete(tracked["start"], "end")
+                    self._text.delete(start_mark, end_mark)
                     self._text.configure(state="disabled")
-                    self._render_entry(final_entry)
+                    self._render_entry_at(final_entry, start_mark)
+                try:
+                    self._text.mark_unset(start_mark, end_mark)
+                except tk.TclError:
+                    pass
             self._stream_entries.clear()
-            
+
         new_entries = [
             e for e in state.conversation
             if e.id > self._last_rendered_id
             and e.id not in self._stream_entries
             and e.id != streaming_id
-         ]
+        ]
         if not new_entries:
             return
 
-        # If currently streaming, finish immediately before new entries
+        # If currently typewriter streaming, finish immediately before new entries
         if self._streaming:
             self._finish_stream_immediately()
 
-        # Hide thinking before any AZMUTH messages
+        # Hide thinking before AZMUTH messages, Stopped markers, or errors
         for entry in new_entries:
-            if entry.speaker == Speaker.AZMUTH:
+            if (
+                entry.speaker == Speaker.AZMUTH
+                or (entry.speaker == Speaker.SYSTEM and (
+                    "Stopped" in entry.text or entry.level == LogLevel.ERROR
+                ))
+            ):
                 self._hide_thinking()
                 break
 

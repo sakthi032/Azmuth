@@ -160,6 +160,10 @@ class Tool(ABC):
         """
         return True
 
+    def unavailable_reason(self) -> str | None:
+        """Return an actionable message explaining why ``is_available()`` is False."""
+        return None
+
     # -- execution ----------------------------------------------------------
     @abstractmethod
     async def execute(self, **kwargs: Any) -> Any:

@@ -13,6 +13,8 @@ markers = [
     "adversarial: security-focused tests for untrusted input handling",
     "windows: Windows-specific behaviour (skipped on other platforms)",
     "slow: takes more than a second; excluded by default in CI",
+    "network: tests that legitimately require real outbound network access",
+    "asyncio: mark test as async",
 ]
 # Tests are expected to finish quickly; anything over 60s is a hang.
 timeout = 60
