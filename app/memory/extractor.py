@@ -133,6 +133,16 @@ _FACT_RULES: list[tuple[re.Pattern[str], str | None, MemoryKind]] = [
         "Role",
         MemoryKind.FACT,
     ),
+    # City
+    (
+        re.compile(
+            r"\bi (?:live|stay|reside) in\s+([A-Za-z][A-Za-z' .-]*?)"
+            r"(?:[,.]|\s+and\s+|$)",
+            re.IGNORECASE,
+        ),
+        "City",
+        MemoryKind.FACT,
+    ),
     # Generic "my X is Y"
     (
         re.compile(

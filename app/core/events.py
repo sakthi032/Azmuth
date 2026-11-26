@@ -57,7 +57,7 @@ class EventName(str, Enum):
     SYSTEM_ERROR = "SYSTEM_ERROR"
     REMINDER_FIRED = "REMINDER_FIRED"
     REMINDER_DUE = "REMINDER_DUE"
-
+    SANDBOX_RESULT = "SANDBOX_RESULT"
 
 @dataclass(frozen=True, slots=True)
 class Event:

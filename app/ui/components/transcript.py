@@ -20,6 +20,12 @@ from typing import Callable
 
 from app.ui.state import LogLevel, Speaker, UIState
 from app.tasks.time_parser import IST
+try:
+    from PIL import Image, ImageTk
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
+
 
 # ── Palette ──────────────────────────────────────────────────────────
 _BG      = "#1e1e2e"
@@ -91,6 +97,7 @@ class TranscriptView(tk.Frame):
         self._stream_chars_done = 0
         self._stream_entry = None
         self._stream_name_start: str = "1.0"
+        self._image_refs: list = []   # prevent PhotoImage GC
 
         self._welcome_active = True
 
@@ -323,6 +330,109 @@ class TranscriptView(tk.Frame):
             meta_parts.append(f"[{entry.provider}]")
         self._text.insert(pos,
             "   \u00b7   ".join(meta_parts) + "\n", ("meta",))
+
+    # ── Inline images (sandbox charts, PNGs) ────────────────────────────
+    def insert_image(
+        self,
+        name: str,
+        png_bytes: bytes,
+        *,
+        save_to_documents: bool = True,
+    ) -> None:
+        """Render a PNG inline at the end of the transcript.
+
+        Called from the app when a SANDBOX_RESULT event carries image
+        files. Falls back to a filename-only line if Pillow is missing
+        or the bytes are not a decodable image.
+        """
+        if not _HAS_PIL:
+            self._text.configure(state="normal")
+            self._text.insert("end", f"\n  [image: {name}]\n", ("meta",))
+            self._text.configure(state="disabled")
+            self._text.see("end")
+            return
+
+        try:
+            import io
+            img = Image.open(io.BytesIO(png_bytes))
+            img.load()
+            max_side = 640
+            w, h = img.size
+            if max(w, h) > max_side:
+                scale = max_side / max(w, h)
+                img = img.resize(
+                    (int(w * scale), int(h * scale)), Image.LANCZOS,
+                )
+            photo = ImageTk.PhotoImage(img)
+        except Exception:
+            self._text.configure(state="normal")
+            self._text.insert("end", f"\n  [image: {name}]\n", ("meta",))
+            self._text.configure(state="disabled")
+            self._text.see("end")
+            return
+
+        self._image_refs.append(photo)
+        idx = len(self._image_refs) - 1
+
+        self._text.configure(state="normal")
+        self._text.insert("end", "\n", ("body_azmuth",))
+        self._text.image_create("end", image=photo, padx=18, pady=6)
+        self._text.insert("end", "\n", ("body_azmuth",))
+
+        if save_to_documents:
+            save_tag = f"save_{idx}"
+            self._text.insert(
+                "end",
+                f"  \U0001F4BE Save {name} to Documents\n",
+                ("meta", save_tag),
+            )
+            self._text.tag_configure(
+                save_tag, foreground=_BLUE, underline=True,
+            )
+            self._text.tag_bind(
+                save_tag, "<Enter>",
+                lambda _e: self._text.configure(cursor="hand2"),
+            )
+            self._text.tag_bind(
+                save_tag, "<Leave>",
+                lambda _e: self._text.configure(cursor="xterm"),
+            )
+            self._text.tag_bind(
+                save_tag, "<Button-1>",
+                lambda _e, n=name, b=png_bytes: self._save_to_documents(n, b),
+            )
+
+        self._text.configure(state="disabled")
+        self._text.see("end")
+
+    def _save_to_documents(self, name: str, png_bytes: bytes) -> None:
+        """Copy a sandbox artifact to the user's Documents folder."""
+        try:
+            from pathlib import Path
+            docs = Path.home() / "Documents" / "Azmuth"
+            docs.mkdir(parents=True, exist_ok=True)
+            # Avoid clobber: suffix on collision
+            target = docs / name
+            stem = target.stem
+            suffix = target.suffix
+            n = 1
+            while target.exists():
+                target = docs / f"{stem}_{n}{suffix}"
+                n += 1
+            target.write_bytes(png_bytes)
+            self._text.configure(state="normal")
+            self._text.insert(
+                "end", f"  \u2713 Saved to {target}\n", ("meta",),
+            )
+            self._text.configure(state="disabled")
+            self._text.see("end")
+        except Exception as exc:
+            self._text.configure(state="normal")
+            self._text.insert(
+                "end", f"  \u2717 Save failed: {exc}\n", ("body_error",),
+            )
+            self._text.configure(state="disabled")
+            self._text.see("end")
 
     # ── Typewriter streaming ───────────────────────────────────────────
     def _render_entry_streamed(self, entry) -> None:

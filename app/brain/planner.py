@@ -6,7 +6,7 @@ Enables Azmuth to handle complex, multi-step goals autonomously:
 3. Select appropriate tools for each task.
 4. Execute steps sequentially with context passing.
 5. Recover from failures with self-healing retries.
-6. Verify every result (e.g. check files actually exist on disk).
+6. Verify every result (tool success flag, content checks, file existence where applicable).
 7. Deliver a comprehensive final report and spoken summary.
 """
 
@@ -301,6 +301,11 @@ For each step, specify:
 - dependencies: list of step ids that must finish before this step
 - verification: how to verify this step succeeded (e.g., "file_exists", "has_results", "content_not_empty")
 
+IMPORTANT – run_python tool:
+- run_python executes code in a SANDBOX (temp directory). Files saved inside the sandbox (e.g. chart.png) are captured and returned as base64 in the tool result.
+- Do NOT add a file_stat step to verify files produced by run_python – they are not on the workspace disk.
+- Verify a run_python step by checking success=true and stdout/files in the tool result, NOT by calling file_stat afterward.
+
 Output ONLY valid JSON in this exact structure:
 {{
   "goal": "{goal}",
@@ -549,6 +554,13 @@ Output ONLY valid JSON in this exact structure:
 
                         if tool_result.success:
                             step.result = tool_result.output
+                            # Emit SANDBOX_RESULT so the UI can render inline images
+                            # produced by run_python (charts, PNGs) even when called
+                            # through the planner path rather than the pipeline loop.
+                            if step.tool_name == "run_python" and isinstance(tool_result.output, dict):
+                                _files = tool_result.output.get("files") or []
+                                if _files:
+                                    await self._emit(EventName.SANDBOX_RESULT, files=_files)
                             # Strict verification check
                             is_verified, v_note = await self._verify_step(step, resolved_args, tool_result.output)
                             step.verified = is_verified
@@ -662,6 +674,25 @@ Output ONLY valid JSON in this exact structure:
     # -- 3. Step Verification -----------------------------------------------
     async def _verify_step(self, step: PlanStep, arguments: dict[str, Any], output: Any) -> tuple[bool, str]:
         """Verify the actual execution outcome of a step with independent checks."""
+        # Verification 0: run_python — files live in temp sandbox, not on disk.
+        # Verify by success flag and (optionally) captured files/stdout.
+        if step.tool_name == "run_python":
+            if not isinstance(output, dict):
+                return False, "run_python returned unexpected non-dict result"
+            if not output.get("success"):
+                stderr = (output.get("stderr") or "")[:300]
+                timed_out = output.get("timed_out", False)
+                if timed_out:
+                    return False, "run_python timed out"
+                return False, f"run_python exited non-zero: {stderr or '(no stderr)'}"
+            files = output.get("files") or []
+            stdout = (output.get("stdout") or "").strip()
+            detail = f"stdout={len(stdout)} chars"
+            if files:
+                names = ", ".join(f.get("name", "?") for f in files if isinstance(f, dict))
+                detail += f"; files=[{names}]"
+            return True, f"Sandbox executed successfully ({detail})"
+
         # Verification 1: File Write verification (output check, stat check on disk, size > 0, content check)
         if step.tool_name == "file_write":
             # Output from FileWriteTool is FileInfo.as_dict(): {"path": ..., "is_dir": False, "size": ...}

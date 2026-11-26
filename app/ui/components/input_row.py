@@ -95,6 +95,15 @@ class InputRow(tk.Frame):
         )
         self._stop_btn.pack(side="left", padx=(0, 6), pady=10)
 
+        # Inline status label — shows "Running code…" during a
+        # sandboxed run and clears when it finishes. Hidden when idle.
+        self._running_label = tk.Label(
+            self, text="",
+            bg=_BASE, fg=_ORANGE,
+            font=("Segoe UI", 10, "italic"),
+        )
+        self._running_label.pack(side="left", padx=(0, 6), pady=10)
+
         # ── Divider ──
         tk.Frame(self, bg=_SURF0, width=1).pack(
             side="left", fill="y", padx=4, pady=14)
@@ -172,6 +181,12 @@ class InputRow(tk.Frame):
         self._stop_btn.configure(state="disabled", text="\u25a0 Stopping")
         self._send_btn.configure(state="disabled")
         self._entry.configure(state="disabled")
+
+    def set_running_code(self, active: bool) -> None:
+        """Show/hide the 'Running code…' indicator."""
+        self._running_label.configure(
+            text="\u2699 Running code\u2026" if active else ""
+        )
 
     def set_text(self, text: str) -> None:
         """Replace the entry contents (used after attaching a file)."""

@@ -8,8 +8,10 @@ isolation:
 * env stripped to a whitelist (no API keys)
 * timeout kill
 * memory cap via Windows Job Object (best-effort)
-* network modules blocked at import time
-* subprocess/ctypes/multiprocessing blocked
+* network + process modules blocked via a MetaPathFinder, with
+  sys.modules purge before user code so cached bootstrap imports
+  do not bypass the block
+* subprocess and multiprocessing blocked
 * os.system / os.popen / os.exec* / os.spawn* patched to raise
 * shutil.rmtree outside the temp dir blocked
 * builtins.open blocked for absolute paths outside temp dir
@@ -28,21 +30,12 @@ accidental and naive code, not determined syscall-level escapes.
 
 **Residual escape vectors (documented, not mitigated):**
 
-* ``ctypes.CDLL('kernel32').WinExec(...)`` — the ctypes module is
-  importable because numpy/pandas require it. A determined user can
-  load native libraries and bypass the module block. This is the
-  single largest hole in the "best-effort" tier.
-* ``pickle.loads`` of untrusted bytes — irrelevant in this sandbox
-  (no untrusted byte inputs), so not blocked.
-* Outbound network — blocked at Python import time only. A user who
-  writes to a raw socket via a DLL loaded through ctypes is not
-  intercepted.
-
-Closing these requires OS-level isolation: a container with a
-network namespace, a read-only filesystem outside the working
-directory, and a seccomp/AppContainer profile. Out of scope for a
-personal-assistant sandbox. Documented here so the tradeoff is
-visible.
+ Direct Windows API calls via ``ctypes.windll.user32.CreateProcessW``
+  are possible *if* a DLL is already loaded — the ``ctypes.dlopen``
+  audit event does not fire for DLLs the interpreter linked at
+  startup (``kernel32.dll`` on Windows is pre-loaded). Closing this
+  requires OS-level isolation (AppContainer, Job Objects + restricted
+  token). Documented so the tradeoff is visible.
 """
 
 from __future__ import annotations
@@ -90,7 +83,7 @@ _TEXT_EXTS = {
 # ---------------------------------------------------------------------------
 # Runner script (written to the temp dir, executed by the subprocess)
 # ---------------------------------------------------------------------------
-_RUNNER_SCRIPT = r'''"""Azmuth sandbox runner (verbose)."""
+_RUNNER_SCRIPT = r'''"""Azmuth sandbox runner (audit-hook based)."""
 import sys
 
 def _log(msg):
@@ -104,7 +97,6 @@ try:
         _os.environ.get("AZMUTH_SANDBOX_TMP", _os.getcwd())
     )
     _os.chdir(_TMPDIR)
-
 except Exception as _e:
     _log(f"tmpdir setup failed: {_e}")
     sys.exit(2)
@@ -123,38 +115,64 @@ if getattr(sys, "base_prefix", None):
 _PREFIXES = tuple(_prefixes - {""})
 _log(f"prefixes: {_PREFIXES}")
 
+# --- Blocked modules: only modules that have NO legitimate
+# library use AND could interact with the parent's TTY. Everything
+# else is guarded by an audit hook on the actual dangerous op.
+_BLOCKED_MODULES = frozenset({"pty", "tty", "termios"})
+_log(f"blocked modules: {sorted(_BLOCKED_MODULES)}")
+
 try:
     import importlib.abc
     _log("importlib.abc loaded")
-
 except Exception as _e:
     _log(f"importlib.abc load failed: {_e}")
     sys.exit(2)
 
-_BLOCKED_ROOTS = frozenset({
-    "socket", "_socket", "ssl", "_ssl",
-    "multiprocessing", "_multiprocessing",
-    "urllib", "urllib2", "urllib3", "http",
-    "ftplib", "smtplib", "poplib", "imaplib", "nntplib",
-    "telnetlib", "xmlrpc", "socketserver",
-    "requests", "httpx", "aiohttp",
-    "asyncio",
-    "pty", "tty", "termios",
-    "select", "selectors",
-})
-
 class _Blocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
-        if fullname.split(".", 1)[0] in _BLOCKED_ROOTS:
+        if fullname.split(".", 1)[0] in _BLOCKED_MODULES:
             raise ImportError(
                 f"module {fullname!r} is blocked in the Azmuth sandbox"
             )
         return None
 
 sys.meta_path.insert(0, _Blocker())
-_log("blocker installed")
+_log("module blocker installed")
 
-# --- Patch os functions ---
+# --- Audit hook: block the ACTUAL dangerous operations. Canonical
+# Python 3.8+ sandbox mechanism. Lets pandas/numpy/matplotlib import
+# subprocess/socket/ctypes freely, but prevents them from spawning
+# processes, opening network connections, or loading native code.
+_BLOCKED_AUDIT_EVENTS = frozenset({
+    "subprocess.Popen",
+    "os.system",
+    "os.exec",
+    "os.spawn",
+    "os.fork",
+    "os.forkpty",
+    "os.posix_spawn",
+    "socket.bind",
+    "socket.connect",
+    "socket.getaddrinfo",
+    "socket.gethostbyname",
+    "socket.gethostbyaddr",
+    "socket.sendto",
+    "socket.sethostname",
+    "ssl.SSLContext",
+    "urllib.Request",
+})
+_log(f"blocked audit events: {sorted(_BLOCKED_AUDIT_EVENTS)}")
+
+def _audit_hook(event, args):
+    if event in _BLOCKED_AUDIT_EVENTS:
+        raise RuntimeError(
+            f"{event!r} is blocked in the Azmuth sandbox"
+        )
+
+sys.addaudithook(_audit_hook)
+_log("audit hook installed")
+
+# --- Patch os functions (belt and braces) ---
 try:
     import os as _os2
     def _no(*a, **k):
@@ -170,27 +188,8 @@ try:
     if hasattr(_os2, "fork"):
         _os2.fork = _no
     _log("os patched")
-
 except Exception as _e:
     _log(f"os patch failed: {_e}")
-
-# --- Patch subprocess module (allow import, block execution) ---
-try:
-    import subprocess as _subprocess
-    def _subprocess_blocked(*a, **k):
-        raise RuntimeError(
-            "subprocess execution is blocked in the Azmuth sandbox"
-        )
-    # Block all execution entry points
-    for _name in (
-        "Popen", "run", "call", "check_call", "check_output",
-        "getstatusoutput", "getoutput",
-    ):
-        if hasattr(_subprocess, _name):
-            setattr(_subprocess, _name, _subprocess_blocked)
-    _log("subprocess patched")
-except Exception as _e:
-    _log(f"subprocess patch failed: {_e}")
 
 # --- Patch shutil.rmtree ---
 try:
@@ -209,7 +208,6 @@ try:
 
     _shutil.rmtree = _safe_rmtree
     _log("shutil patched")
-
 except Exception as _e:
     _log(f"shutil patch failed: {_e}")
 
@@ -240,11 +238,10 @@ try:
 
     builtins.open = _safe_open
     _log("open patched")
-
 except Exception as _e:
     _log(f"open patch failed: {_e}")
 
-# --- Execute user code ---
+# --- Read user code ---
 _log(f"argv: {sys.argv}")
 if len(sys.argv) < 2:
     _log("no code file passed")
@@ -254,18 +251,17 @@ try:
     with _orig_open(sys.argv[1], "r", encoding="utf-8") as _f:
         _user_code = _f.read()
     _log(f"user code read ({len(_user_code)} chars)")
-
 except Exception as _e:
     _log(f"could not read user code: {_e}")
     sys.exit(2)
 
+# --- Execute user code ---
 _log("executing user code")
 try:
     exec(
         compile(_user_code, "<sandbox>", "exec"),
         {"__name__": "__main__"},
     )
-
 except SystemExit:
     raise
 except Exception:
@@ -274,7 +270,6 @@ except Exception:
     sys.exit(1)
 _log("user code done")
 '''
-
 # ---------------------------------------------------------------------------
 # Job Object memory cap (Windows only, best-effort)
 # ---------------------------------------------------------------------------

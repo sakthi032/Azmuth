@@ -29,6 +29,30 @@ from app.memory.vectors.null import NullEmbeddingProvider, NullVectorStore
 
 logger = get_logger("memory")
 
+_SINGLE_VALUED_FACT_KEYS: frozenset[str] = frozenset({
+    "name",
+    "city",
+    "location",
+    "hometown",
+    "country",
+    "employer",
+    "works at",
+    "role",
+    "email",
+    "phone",
+    "age",
+    "birthday",
+    "timezone",
+})
+
+
+def single_valued_fact_key(content: str) -> str | None:
+    """Return the normalized single-valued key if ``content`` is ``Key: Value``."""
+    if ":" not in content:
+        return None
+    key = content.split(":", 1)[0].strip().lower()
+    return key if key in _SINGLE_VALUED_FACT_KEYS else None
+
 
 class MemoryManager:
     """High-level memory operations for the rest of Azmuth."""
@@ -72,6 +96,12 @@ class MemoryManager:
         importance: float = 0.5,
         memory_id: str | None = None,
     ) -> MemoryRecord:
+        fact_key = single_valued_fact_key(content)
+        if fact_key is not None and user_id is not None:
+            for existing in self._backend.list(user_id=user_id, limit=200):
+                if single_valued_fact_key(existing.content) == fact_key:
+                    self.delete(existing.id)
+
         record = MemoryRecord(
             id=memory_id or new_memory_id(),
             user_id=user_id,
@@ -265,6 +295,26 @@ class MemoryManager:
         return self._backend.list(
             user_id=user_id, kind=kind, limit=limit, offset=offset
         )
+
+    def deduplicate_user_facts(self, user_id: str) -> int:
+        """Remove older duplicate records for single-valued fact keys.
+
+        Keeps the newest record (by ``updated_at DESC``) per single-valued
+        key (e.g. ``Name``, ``City``) and deletes older conflicting ones.
+        """
+        records = self._backend.list(user_id=user_id, limit=200)
+        seen_keys: set[str] = set()
+        deleted = 0
+        for r in records:
+            key = single_valued_fact_key(r.content)
+            if key is None:
+                continue
+            if key in seen_keys:
+                if self.delete(r.id):
+                    deleted += 1
+            else:
+                seen_keys.add(key)
+        return deleted
 
     def count(
         self,

@@ -100,26 +100,23 @@ def test_registry_local_only_filter() -> None:
 
 
 def test_default_registry_contains_verified_models() -> None:
-    """The registry lists only models confirmed working on NVIDIA NIM.
+    """The registry lists expected stable models.
 
-    These are the seven IDs that came back OK from
-    scripts/nvidia_availability. If a model is retired on NVIDIA's side,
-    re-run that script and update both the registry and this test.
+    Update this test when the registry is intentionally changed.
     """
     r = build_default_registry()
     names = {m.name for m in r.all()}
-    assert "z-ai/glm-5.3" in names
     assert "nvidia/nemotron-3-ultra-550b-a55b" in names
     assert "nvidia/nemotron-3.5-lightning-30b-a3b" in names
-    assert "deepseek-ai/deepseek-v4.1-flash" in names
+    assert "moonshotai/kimi-k3.1-pro" in names
     assert "llama-3.3-70b-versatile" in names
 
 
 def test_default_registry_coding_prefers_deepseek() -> None:
     r = build_default_registry()
     coders = r.by_purpose(ModelPurpose.CODING)
-    # DeepSeek V4.1 Flash is tier-1 for coding in the cloud-only setup.
-    assert coders[0].name == "deepseek-ai/deepseek-v4.1-flash"
+    # kimi-k3.1-pro is tier-1 for coding in the current cloud-only setup.
+    assert coders[0].name == "moonshotai/kimi-k3.1-pro"
     assert coders[0].is_local is False
     assert coders[0].tier == 1
 

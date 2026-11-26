@@ -27,15 +27,12 @@ def test_no_duplicate_models_in_default_registry() -> None:
         assert pair not in seen, f"Duplicate model registration: {pair}"
         seen.add(pair)
 
-    # Specific check for models previously duplicated
-    glm = [m for m in registry.all() if m.name == "z-ai/glm-5.3"]
-    assert len(glm) == 1, f"Expected 1 glm-5.3, found {len(glm)}"
-
-    deepseek = [m for m in registry.all() if m.name == "deepseek-ai/deepseek-v4.1-flash"]
-    assert len(deepseek) == 1, f"Expected 1 deepseek-v4.1-flash, found {len(deepseek)}"
-
+    # Specific check for models that must be present (update when registry changes)
     nemotron = [m for m in registry.all() if m.name == "nvidia/nemotron-3.5-lightning-30b-a3b"]
     assert len(nemotron) == 1, f"Expected 1 nemotron-3.5-lightning, found {len(nemotron)}"
+
+    kimi = [m for m in registry.all() if m.name == "moonshotai/kimi-k3.1-pro"]
+    assert len(kimi) == 1, f"Expected 1 kimi-k3.1-pro, found {len(kimi)}"
 
 
 def test_registry_register_merges_purposes_and_tiers() -> None:

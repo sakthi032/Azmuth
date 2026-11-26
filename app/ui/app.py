@@ -67,6 +67,8 @@ class AzmuthDesktopApp:
         self._scheduler = scheduler
         self._pending_attachment: str | None = None
         self._turn_in_flight = False
+        self._sandbox_sub = None
+        self._tool_event_sub = None
         self._root = tk.Tk()
         self._root.title(title)
 
@@ -237,6 +239,18 @@ class AzmuthDesktopApp:
                 logger.exception("reminder notifier install failed")
                 self._reminder_notifier = None
 
+            # Sandbox-result images — render inline in the transcript
+            try:
+                from app.core.events import EventName as _EN
+                self._sandbox_sub = self._event_bus.subscribe(
+                    _EN.SANDBOX_RESULT, self._on_sandbox_result
+                )
+                self._tool_event_sub = self._event_bus.subscribe(
+                    _EN.TOOL_STARTED, self._on_tool_started
+                )
+            except Exception:
+                logger.exception("UI event subscriptions failed")
+
         if self._scheduler is not None:
             self._root.after(100, self._start_reminder_scheduler)
 
@@ -352,6 +366,46 @@ class AzmuthDesktopApp:
     def _on_transcript_stream_change(self, _active: bool) -> None:
         self._sync_streaming_controls()
 
+    def _on_sandbox_result(self, event) -> None:
+        """Decode image files and schedule inline rendering."""
+        payload = dict(getattr(event, "payload", {}) or {})
+        files = payload.get("files") or []
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            if f.get("kind") != "image":
+                continue
+            b64 = f.get("data_b64")
+            name = f.get("name", "chart.png")
+            if not b64:
+                continue
+            try:
+                import base64
+                raw = base64.b64decode(b64)
+            except Exception:
+                logger.exception("sandbox file decode failed")
+                continue
+            self._post_to_ui(self._render_inline_image, name, raw)
+
+    def _render_inline_image(self, name: str, png_bytes: bytes) -> None:
+        try:
+            self._transcript.insert_image(name, png_bytes)
+        except Exception:
+            logger.exception("inline image render failed")
+
+    def _on_tool_started(self, event) -> None:
+        """Toggle 'Running code…' when run_python fires."""
+        payload = dict(getattr(event, "payload", {}) or {})
+        tool = payload.get("tool")
+        if tool == "run_python":
+            self._post_to_ui(self._set_running_code, True)
+
+    def _set_running_code(self, active: bool) -> None:
+        try:
+            self._input_row.set_running_code(active)
+        except Exception:
+            pass
+
     def _sync_streaming_controls(self) -> None:
         streaming = self._turn_in_flight or self._transcript.is_streaming
         try:
@@ -418,6 +472,7 @@ class AzmuthDesktopApp:
                 return
         finally:
             self._turn_in_flight = False
+            self._post_to_ui(self._set_running_code, False)
             self._post_to_ui(self._sync_streaming_controls)
 
         if reply and self._always_speak:
@@ -620,6 +675,14 @@ class AzmuthDesktopApp:
             except Exception:
                 pass
             self._ui_pump_after_id = None
+        for sub in (self._sandbox_sub, self._tool_event_sub):
+            if sub is not None:
+                try:
+                    sub()
+                except Exception:
+                    pass
+        self._sandbox_sub = None
+        self._tool_event_sub = None
         if self._reminder_notifier is not None:
             try:
                 self._reminder_notifier.detach()
