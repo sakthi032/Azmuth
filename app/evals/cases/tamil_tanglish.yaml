@@ -1,0 +1,99 @@
+# Tamil & Tanglish cases — language detection, replying in the user's language,
+# Tamil date/time questions, and zero script mixing.
+
+- id: tamil_tanglish_greeting_tamil
+  category: tamil_tanglish
+  input: "வணக்கம், எப்படி இருக்கீங்க?"
+  stub_responses:
+    - content: "வணக்கம்! நான் நலமாக இருக்கிறேன். உங்களுக்கு எப்படி உதவலாம்?"
+  forbidden_tools: [search_web, run_python]
+  checks:
+    - type: response_no_script_mixing
+    - type: response_matches
+      pattern: "வணக்கம்|நலமாக|உதவலாம்"
+
+- id: tamil_tanglish_greeting_tanglish
+  category: tamil_tanglish
+  input: "vanakkam bro, eppadi irukka?"
+  stub_responses:
+    - content: "Vanakkam! Naan nalla irukken. Enna help venum?"
+  forbidden_tools: [search_web, run_python]
+  checks:
+    - type: response_no_script_mixing
+    - type: response_matches
+      pattern: "Vanakkam|nalla|help"
+
+- id: tamil_tanglish_time_tamil
+  category: tamil_tanglish
+  input: "இப்போது நேரம் என்ன?"
+  stub_responses:
+    - tool_calls:
+        - name: get_time
+          arguments: {}
+    - content: "இப்போது நேரம் மாலை 5:30 மணி."
+  expected_tools: [get_time]
+  checks:
+    - type: response_no_script_mixing
+    - type: response_matches
+      pattern: "நேரம்|மணி"
+
+- id: tamil_tanglish_time_tanglish
+  category: tamil_tanglish
+  input: "ippo time enna?"
+  stub_responses:
+    - tool_calls:
+        - name: get_time
+          arguments: {}
+    - content: "Ippo time 5:30 PM."
+  expected_tools: [get_time]
+  checks:
+    - type: response_no_script_mixing
+    - type: response_matches
+      pattern: "time|5:30"
+
+- id: tamil_tanglish_date_tamil
+  category: tamil_tanglish
+  input: "இன்று என்ன தேதி?"
+  stub_responses:
+    - tool_calls:
+        - name: get_time
+          arguments: {}
+    - content: "இன்று நவம்பர் 27, வெள்ளிக்கிழமை."
+  expected_tools: [get_time]
+  checks:
+    - type: response_no_script_mixing
+    - type: response_matches
+      pattern: "இன்று|நவம்பர்"
+
+- id: tamil_tanglish_weather_tanglish
+  category: tamil_tanglish
+  input: "chennai-la weather eppadi irukku?"
+  stub_responses:
+    - tool_calls:
+        - name: get_weather
+          arguments: {city: "Chennai"}
+    - content: "Chennai-la ippo 30 degree Celsius, konjam megam irukku."
+  expected_tools: [get_weather]
+  forbidden_tools: [search_web]
+  checks:
+    - type: response_no_script_mixing
+    - type: response_matches
+      pattern: "Chennai"
+
+- id: tamil_tanglish_thanks_tamil
+  category: tamil_tanglish
+  input: "நன்றி"
+  stub_responses:
+    - content: "மகிழ்ச்சி! வேறு ஏதாவது உதவி தேவையா?"
+  forbidden_tools: [run_python, search_web]
+  checks:
+    - type: response_no_script_mixing
+
+- id: tamil_tanglish_busy_tanglish
+  category: tamil_tanglish
+  input: "romba busy-a irukken, oru joke sollu"
+  stub_responses:
+    - content: "Oru computer yen doctor kitta pochu? Athukku virus vandhiruchu!"
+  forbidden_tools: [run_python, search_web]
+  checks:
+    - type: response_no_script_mixing

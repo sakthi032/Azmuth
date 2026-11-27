@@ -1,0 +1,157 @@
+# Reminder cases — English, Tamil, and Tanglish time parsing, missing message,
+# recurring tasks, cancel/list, and no duplicate/stale message reuse.
+
+- id: reminder_english_in_2_hours
+  category: reminders
+  input: "remind me in 2 hours to call the dentist"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {message: "call the dentist", when_text: "in 2 hours"}
+    - content: "Reminder set: call the dentist in 2 hours."
+  expected_tools: [schedule_reminder]
+  forbidden_tools: [search_web, run_python]
+  checks:
+    - type: response_matches
+      pattern: "(call the dentist|2 hours|reminder set)"
+
+- id: reminder_english_in_10_minutes
+  category: reminders
+  input: "set a reminder in 10 minutes to stretch"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {message: "stretch", when_text: "in 10 minutes"}
+    - content: "I'll remind you to stretch in 10 minutes."
+  expected_tools: [schedule_reminder]
+  forbidden_tools: [add_note, add_todo]
+  checks:
+    - type: response_matches
+      pattern: "stretch"
+
+- id: reminder_tanglish_naalaikku_kaalai
+  category: reminders
+  input: "naalaikku kaalai 7 manikku gym-ku poga remind pannu"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {message: "gym-ku poga", when_text: "naalaikku kaalai 7 manikku"}
+    - content: "Naalaikku kaalai 7 manikku gym-ku poga reminder set pannitten."
+  expected_tools: [schedule_reminder]
+  forbidden_tools: [search_web]
+  checks:
+    - type: response_no_script_mixing
+    - type: response_matches
+      pattern: "gym|7"
+
+- id: reminder_tanglish_inniki_maalai
+  category: reminders
+  input: "inniki maalai 6 manikku tea kudikka remind pannu"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {message: "tea kudikka", when_text: "inniki maalai 6 manikku"}
+    - content: "Inniki maalai 6 manikku tea kudikka reminder set pannitten."
+  expected_tools: [schedule_reminder]
+  forbidden_tools: [search_web, add_note]
+  checks:
+    - type: response_no_script_mixing
+    - type: response_matches
+      pattern: "tea|6"
+
+- id: reminder_tamil_script
+  category: reminders
+  input: "நாளை காலை 8 மணிக்கு மருந்து சாப்பிட நினைவூட்டு"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {message: "மருந்து சாப்பிட", when_text: "நாளை காலை 8 மணிக்கு"}
+    - content: "நாளை காலை 8 மணிக்கு மருந்து சாப்பிட நினைவூட்டல் அமைத்துவிட்டேன்."
+  expected_tools: [schedule_reminder]
+  forbidden_tools: [search_web]
+  checks:
+    - type: response_no_script_mixing
+
+- id: reminder_missing_message_asks
+  category: reminders
+  input: "remind me at 5pm"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {when_text: "at 5pm"}
+    - content: "What should I remind you about at 5pm?"
+  setup:
+    tool_outputs:
+      schedule_reminder:
+        scheduled: false
+        needs_clarification: "message"
+        prompt: "What should I remind you about?"
+  expected_tools: [schedule_reminder]
+  checks:
+    - type: response_matches
+      pattern: "(what|remind).+\\?"
+
+- id: reminder_missing_message_never_reuses
+  category: reminders
+  input: "set another reminder for 9am"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {when_text: "9am"}
+    - content: "What should I remind you about at 9am?"
+  setup:
+    memories:
+      - content: "Previous reminder: buy groceries"
+    tool_outputs:
+      schedule_reminder:
+        scheduled: false
+        needs_clarification: "message"
+        prompt: "What should I remind you about?"
+  expected_tools: [schedule_reminder]
+  checks:
+    - type: response_not_matches
+      pattern: "buy groceries"
+    - type: response_matches
+      pattern: "what|remind"
+
+- id: reminder_every_monday_recurring
+  category: reminders
+  input: "every Monday at 9 remind me to send the weekly report"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_task
+          arguments: {message: "send the weekly report", schedule: "every Monday at 9"}
+    - content: "Scheduled a recurring task every Monday at 9: send the weekly report."
+  expected_tools: [schedule_task]
+  forbidden_tools: [schedule_reminder, search_web]
+  checks:
+    - type: response_matches
+      pattern: "(Monday|weekly report|recurring|scheduled)"
+
+- id: reminder_cancel_task
+  category: reminders
+  input: "cancel my dentist reminder"
+  stub_responses:
+    - tool_calls:
+        - name: cancel_scheduled_task
+          arguments: {query: "dentist"}
+    - content: "Cancelled your dentist reminder."
+  expected_tools: [cancel_scheduled_task]
+  forbidden_tools: [schedule_reminder]
+  checks:
+    - type: response_matches
+      pattern: "(cancel|removed)"
+
+- id: reminder_list_tasks
+  category: reminders
+  input: "show my reminders"
+  stub_responses:
+    - tool_calls:
+        - name: list_scheduled_tasks
+          arguments: {}
+    - content: "You have 1 upcoming reminder: call the dentist at 5pm."
+  expected_tools: [list_scheduled_tasks]
+  forbidden_tools: [schedule_reminder, search_web]
+  checks:
+    - type: response_matches
+      pattern: "reminder"

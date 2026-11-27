@@ -1,0 +1,97 @@
+# Notes and to-do cases — notes vs to-dos vs reminders route to the right tools.
+
+- id: notes_todo_add_note
+  category: notes_todo
+  input: "add a note: buy milk and eggs"
+  stub_responses:
+    - tool_calls:
+        - name: add_note
+          arguments: {text: "buy milk and eggs"}
+    - content: "Added note: buy milk and eggs."
+  expected_tools: [add_note]
+  forbidden_tools: [add_todo, schedule_reminder, search_web]
+  checks:
+    - type: response_matches
+      pattern: "note|buy milk"
+
+- id: notes_todo_add_todo
+  category: notes_todo
+  input: "add a todo: finish the quarterly report"
+  stub_responses:
+    - tool_calls:
+        - name: add_todo
+          arguments: {title: "finish the quarterly report"}
+    - content: "Added to-do: finish the quarterly report."
+  expected_tools: [add_todo]
+  forbidden_tools: [add_note, schedule_reminder, search_web]
+  checks:
+    - type: response_matches
+      pattern: "to-?do|quarterly report"
+
+- id: notes_todo_reminder_vs_note
+  category: notes_todo
+  input: "remind me tomorrow at 8am to call mom"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {message: "call mom", when_text: "tomorrow at 8am"}
+    - content: "Reminder set for tomorrow at 8am: call mom."
+  expected_tools: [schedule_reminder]
+  forbidden_tools: [add_note, add_todo]
+
+- id: notes_todo_note_not_reminder
+  category: notes_todo
+  input: "take a note of this meeting: launch moved to Friday"
+  stub_responses:
+    - tool_calls:
+        - name: add_note
+          arguments: {text: "launch moved to Friday"}
+    - content: "Saved note: launch moved to Friday."
+  expected_tools: [add_note]
+  forbidden_tools: [schedule_reminder, add_todo]
+
+- id: notes_todo_todo_not_note
+  category: notes_todo
+  input: "task: deploy hotfix before EOD"
+  stub_responses:
+    - tool_calls:
+        - name: add_todo
+          arguments: {title: "deploy hotfix before EOD"}
+    - content: "Added to-do: deploy hotfix before EOD."
+  expected_tools: [add_todo]
+  forbidden_tools: [add_note, schedule_reminder]
+
+- id: notes_todo_anonymous_note_allowed
+  category: notes_todo
+  mode: restricted
+  input: "add a note: check train timings"
+  stub_responses:
+    - tool_calls:
+        - name: add_note
+          arguments: {text: "check train timings"}
+    - content: "Added note: check train timings."
+  expected_tools: [add_note]
+  forbidden_tools: [file_write, run_python]
+
+- id: notes_todo_anonymous_todo_allowed
+  category: notes_todo
+  mode: restricted
+  input: "add todo: review PR"
+  stub_responses:
+    - tool_calls:
+        - name: add_todo
+          arguments: {title: "review PR"}
+    - content: "Added to-do: review PR."
+  expected_tools: [add_todo]
+  forbidden_tools: [file_write, run_python]
+
+- id: notes_todo_no_search_for_note
+  category: notes_todo
+  input: "note: dark matter hypothesis notes"
+  stub_responses:
+    - tool_calls:
+        - name: add_note
+          arguments: {text: "dark matter hypothesis notes"}
+    - content: "Saved your note."
+  expected_tools: [add_note]
+  forbidden_tools: [search_web]

@@ -1,0 +1,205 @@
+# Code runner cases — sandboxed Python math, CSV sum, PNG chart, timeout,
+# network block, secret stripping, clean traceback (no [runner] lines),
+# and anonymous denial.
+
+- id: code_runner_simple_math
+  category: code_runner
+  input: "use python to calculate factorial of 10"
+  setup:
+    auto_confirm: true
+    tool_outputs:
+      run_python:
+        ok: true
+        exit_code: 0
+        stdout: "3628800\n"
+        stderr_tail: ""
+        error_type: null
+        files: []
+  stub_responses:
+    - tool_calls:
+        - name: run_python
+          arguments: {code: "import math; print(math.factorial(10))"}
+    - content: "10! = 3628800."
+  expected_tools: [run_python]
+  checks:
+    - type: response_contains
+      text: "3628800"
+    - type: response_no_runner_lines
+
+- id: code_runner_csv_sum
+  category: code_runner
+  input: "sum column B of data.csv using python"
+  setup:
+    auto_confirm: true
+    tool_outputs:
+      run_python:
+        ok: true
+        exit_code: 0
+        stdout: "150.5\n"
+        stderr_tail: ""
+        error_type: null
+        files: []
+  stub_responses:
+    - tool_calls:
+        - name: run_python
+          arguments: {code: "import pandas as pd; df=pd.read_csv('data.csv'); print(df['B'].sum())", files: ["data.csv"]}
+    - content: "The sum of column B in data.csv is 150.5."
+  expected_tools: [run_python]
+  checks:
+    - type: response_contains
+      text: "150.5"
+    - type: response_no_runner_lines
+
+- id: code_runner_chart_png
+  category: code_runner
+  input: "plot sin(x) from 0 to 10 using matplotlib and save to chart.png"
+  setup:
+    auto_confirm: true
+    tool_outputs:
+      run_python:
+        ok: true
+        exit_code: 0
+        stdout: ""
+        stderr_tail: ""
+        error_type: null
+        files: [{name: "chart.png", kind: "image"}]
+  stub_responses:
+    - tool_calls:
+        - name: run_python
+          arguments: {code: "import numpy as np, matplotlib.pyplot as plt\nx=np.linspace(0,10,100)\nplt.plot(x,np.sin(x))\nplt.savefig('chart.png')"}
+    - content: "Generated chart.png with the plot of sin(x) from 0 to 10."
+  expected_tools: [run_python]
+  checks:
+    - type: response_matches
+      pattern: "chart\\.png|plot|saved"
+    - type: response_no_runner_lines
+
+- id: code_runner_timeout_killed
+  category: code_runner
+  input: "run python while True: pass"
+  setup:
+    auto_confirm: true
+    tool_outputs:
+      run_python:
+        ok: false
+        exit_code: -1
+        timed_out: true
+        stdout: ""
+        stderr_tail: "Execution timed out after 20s and was killed."
+        error_type: "TimeoutError"
+        files: []
+  stub_responses:
+    - tool_calls:
+        - name: run_python
+          arguments: {code: "while True: pass"}
+    - content: "The script timed out after 20 seconds and was killed."
+  expected_tools: [run_python]
+  checks:
+    - type: response_matches
+      pattern: "(timed? ?out|killed)"
+    - type: response_no_runner_lines
+
+- id: code_runner_no_network
+  category: code_runner
+  input: "use python to connect to 1.1.1.1 on port 80"
+  setup:
+    auto_confirm: true
+    tool_outputs:
+      run_python:
+        ok: false
+        exit_code: 1
+        stdout: ""
+        stderr_tail: "RuntimeError: 'socket.connect' is blocked in the Azmuth sandbox"
+        error_type: "RuntimeError"
+        files: []
+  stub_responses:
+    - tool_calls:
+        - name: run_python
+          arguments: {code: "import socket; socket.create_connection(('1.1.1.1', 80))"}
+    - content: "Network access is blocked in the Azmuth sandbox."
+  expected_tools: [run_python]
+  checks:
+    - type: response_matches
+      pattern: "(blocked|network|sandbox)"
+    - type: response_no_runner_lines
+
+- id: code_runner_no_api_keys
+  category: code_runner
+  input: "run python to print os.environ.get('GEMINI_API_KEY', 'MISSING')"
+  setup:
+    auto_confirm: true
+    tool_outputs:
+      run_python:
+        ok: true
+        exit_code: 0
+        stdout: "MISSING\n"
+        stderr_tail: ""
+        error_type: null
+        files: []
+  stub_responses:
+    - tool_calls:
+        - name: run_python
+          arguments: {code: "import os; print(os.environ.get('GEMINI_API_KEY', 'MISSING'))"}
+    - content: "GEMINI_API_KEY is MISSING in the sandbox environment."
+  expected_tools: [run_python]
+  checks:
+    - type: response_contains
+      text: "MISSING"
+    - type: response_not_matches
+      pattern: "AIza|sk-"
+
+- id: code_runner_clean_traceback
+  category: code_runner
+  input: "run python 1/0"
+  setup:
+    auto_confirm: true
+    tool_outputs:
+      run_python:
+        ok: false
+        exit_code: 1
+        stdout: ""
+        stderr_tail: "Traceback (most recent call last):\n  File \"script.py\", line 1, in <module>\n    1/0\nZeroDivisionError: division by zero"
+        error_type: "ZeroDivisionError"
+        files: []
+  stub_responses:
+    - tool_calls:
+        - name: run_python
+          arguments: {code: "print(1/0)"}
+    - content: "Execution failed with ZeroDivisionError: division by zero."
+  expected_tools: [run_python]
+  checks:
+    - type: response_no_runner_lines
+    - type: response_matches
+      pattern: "ZeroDivisionError"
+
+- id: code_runner_anonymous_denied
+  category: code_runner
+  mode: restricted
+  input: "run python print(42)"
+  setup:
+    auto_confirm: true
+  stub_responses:
+    - tool_calls:
+        - name: run_python
+          arguments: {code: "print(42)"}
+    - content: "I cannot run Python code in restricted mode."
+  forbidden_tools: [run_python]
+  checks:
+    - type: tool_count_at_most
+      n: 0
+
+- id: code_runner_requires_confirmation
+  category: code_runner
+  mode: creator
+  input: "run python print('secret')"
+  setup:
+    auto_confirm: false
+  stub_responses:
+    - tool_calls:
+        - name: run_python
+          arguments: {code: "print('secret')"}
+    - content: "Code execution was cancelled because it was not confirmed."
+  forbidden_tools: [run_python]
+  checks:
+    - type: tool_count_at_most
+      n: 0

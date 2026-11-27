@@ -1,0 +1,170 @@
+# Tool-selection cases — the model must pick the right tool, not the
+# nearest one. Each case asserts both "tool was called" and "the wrong
+# tool was NOT called".
+
+- id: tool_selection_weather_basic
+  category: tool_selection
+  input: "what's the weather in Chennai?"
+  stub_responses:
+    - tool_calls:
+        - name: get_weather
+          arguments: {city: "Chennai"}
+    - content: "It's 29°C in Chennai with patchy rain."
+  expected_tools: [get_weather]
+  forbidden_tools: [search_web, get_gold_rate]
+
+- id: tool_selection_gold_basic
+  category: tool_selection
+  input: "what is the gold rate today?"
+  stub_responses:
+    - tool_calls:
+        - name: get_gold_rate
+          arguments: {}
+    - content: "Gold is ₹7,200 per gram in Chennai today."
+  expected_tools: [get_gold_rate]
+  forbidden_tools: [search_web, get_weather]
+
+- id: tool_selection_search_overrides_dedicated_gold
+  category: tool_selection
+  input: "search the web for gold price news"
+  stub_responses:
+    - tool_calls:
+        - name: search_web
+          arguments: {query: "gold price news"}
+    - content: "Here's the latest gold price news…"
+  expected_tools: [search_web]
+  forbidden_tools: [get_gold_rate]
+
+- id: tool_selection_search_overrides_dedicated_weather
+  category: tool_selection
+  input: "google weather in Chennai news today"
+  stub_responses:
+    - tool_calls:
+        - name: search_web
+          arguments: {query: "Chennai weather news today"}
+    - content: "Weather news for Chennai today…"
+  expected_tools: [search_web]
+  forbidden_tools: [get_weather]
+
+- id: tool_selection_reminder_basic
+  category: tool_selection
+  input: "remind me in 10 seconds to drink water"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {message: "drink water", when_text: "in 10 seconds"}
+    - content: "Reminder set for 10 seconds from now."
+  expected_tools: [schedule_reminder]
+  forbidden_tools: [search_web, get_weather]
+
+- id: tool_selection_volume
+  category: tool_selection
+  input: "set the volume to 40"
+  stub_responses:
+    - tool_calls:
+        - name: set_volume
+          arguments: {level: 40}
+    - content: "Volume set to 40."
+  expected_tools: [set_volume]
+  forbidden_tools: [search_web, run_python]
+
+- id: tool_selection_mute
+  category: tool_selection
+  input: "mute the sound"
+  stub_responses:
+    - tool_calls:
+        - name: mute
+          arguments: {muted: true}
+    - content: "Muted."
+  expected_tools: [mute]
+  forbidden_tools: [set_volume, search_web]
+
+- id: tool_selection_lock
+  category: tool_selection
+  input: "lock my screen"
+  stub_responses:
+    - tool_calls:
+        - name: lock_screen
+          arguments: {}
+    - content: "Session locked."
+  setup:
+    auto_confirm: true
+  expected_tools: [lock_screen]
+  forbidden_tools: [shutdown_timer, run_python]
+
+- id: tool_selection_describe_screen
+  category: tool_selection
+  input: "what's on my screen?"
+  stub_responses:
+    - tool_calls:
+        - name: describe_screen
+          arguments: {question: "what's on my screen?", region: "active_window"}
+    - content: "You have VS Code open with test_describe_screen.py."
+  expected_tools: [describe_screen]
+  forbidden_tools: [get_weather, search_web, run_python]
+
+- id: tool_selection_browser_tabs
+  category: tool_selection
+  input: "what tabs do I have open in Chrome?"
+  stub_responses:
+    - tool_calls:
+        - name: chrome_ext_list_tabs
+          arguments: {}
+    - content: "You have 3 Chrome tabs open."
+  expected_tools: [chrome_ext_list_tabs]
+  forbidden_tools: [search_web, run_python]
+
+- id: tool_selection_schedule_task_recurring
+  category: tool_selection
+  input: "every day at 9am remind me to exercise"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_task
+          arguments: {message: "exercise", schedule: "every day at 9am"}
+    - content: "Scheduled daily task at 9am: exercise."
+  expected_tools: [schedule_task]
+  forbidden_tools: [schedule_reminder, search_web]
+
+- id: tool_selection_cancel_reminder
+  category: tool_selection
+  input: "cancel my morning reminder"
+  stub_responses:
+    - tool_calls:
+        - name: cancel_scheduled_task
+          arguments: {query: "morning"}
+    - content: "Cancelled your morning reminder."
+  expected_tools: [cancel_scheduled_task]
+  forbidden_tools: [schedule_reminder]
+
+- id: tool_selection_list_reminders
+  category: tool_selection
+  input: "what reminders do I have?"
+  stub_responses:
+    - tool_calls:
+        - name: list_scheduled_tasks
+          arguments: {}
+    - content: "You have no active reminders."
+  expected_tools: [list_scheduled_tasks]
+  forbidden_tools: [schedule_reminder]
+
+- id: tool_selection_read_doc_vs_search
+  category: tool_selection
+  input: "read my local file notes.txt"
+  stub_responses:
+    - tool_calls:
+        - name: read_document
+          arguments: {path: "notes.txt"}
+    - content: "Here are your notes (source: notes.txt, p.1)."
+  expected_tools: [read_document]
+  forbidden_tools: [search_web]
+
+- id: tool_selection_ask_doc_question
+  category: tool_selection
+  input: "what does report.pdf say about revenue?"
+  stub_responses:
+    - tool_calls:
+        - name: ask_document
+          arguments: {path: "report.pdf", question: "revenue"}
+    - content: "Revenue rose 15% (source: report.pdf, p.2)."
+  expected_tools: [ask_document]
+  forbidden_tools: [search_web, run_python]

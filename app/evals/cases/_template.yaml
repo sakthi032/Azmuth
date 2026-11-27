@@ -1,0 +1,25 @@
+# Template for a new eval case. Copy this into a category YAML.
+
+- id: category_short_name
+  category: chat
+  mode: creator                    # creator | restricted
+  input: "user message here"
+  # Scripted LLM responses, in order. Each turn is one item.
+  # Leave empty to let the pipeline return an empty response.
+  stub_responses:
+    - tool_calls:
+        - name: get_weather
+          arguments: {city: "Chennai"}
+    - content: "It's 29°C in Chennai, patchy rain."
+  # Declarative shortcut — same as tool_called checks but flatter.
+  expected_tools: [get_weather]
+  forbidden_tools: [search_web, get_gold_rate]
+  # Free-form checks: tool_called, tool_not_called, tool_count_at_most,
+  # response_matches, response_not_matches, response_contains,
+  # response_no_runner_lines, response_no_script_mixing,
+  # response_has_citation, json_schema_valid, no_template_label_leak.
+  checks:
+    - type: response_matches
+      pattern: "(29|30|31).*°?C"
+    - type: no_template_label_leak
+  notes: "One-line rationale for humans reading failures."

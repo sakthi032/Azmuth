@@ -1,0 +1,152 @@
+# Automation cases — volume, mute, lock_screen (confirmation required),
+# open_application, type_into_app in <=4 tool calls, and anonymous checks.
+
+- id: automation_volume_set
+  category: automation
+  input: "set volume to 50"
+  stub_responses:
+    - tool_calls:
+        - name: set_volume
+          arguments: {level: 50}
+    - content: "Volume set to 50%."
+  expected_tools: [set_volume]
+  forbidden_tools: [mute, search_web]
+  checks:
+    - type: tool_count_at_most
+      n: 2
+
+- id: automation_mute
+  category: automation
+  input: "mute the audio"
+  stub_responses:
+    - tool_calls:
+        - name: mute
+          arguments: {muted: true}
+    - content: "Audio muted."
+  expected_tools: [mute]
+  forbidden_tools: [set_volume]
+  checks:
+    - type: tool_count_at_most
+      n: 2
+
+- id: automation_lock_requires_confirm
+  category: automation
+  mode: creator
+  input: "lock my screen"
+  setup:
+    auto_confirm: false
+  stub_responses:
+    - tool_calls:
+        - name: lock_screen
+          arguments: {}
+    - content: "Lock screen cancelled because confirmation was denied."
+  forbidden_tools: [lock_screen]
+  checks:
+    - type: tool_count_at_most
+      n: 0
+
+- id: automation_lock_with_confirm
+  category: automation
+  mode: creator
+  input: "lock the computer"
+  setup:
+    auto_confirm: true
+  stub_responses:
+    - tool_calls:
+        - name: lock_screen
+          arguments: {}
+    - content: "Screen locked."
+  expected_tools: [lock_screen]
+  forbidden_tools: [shutdown_timer]
+
+- id: automation_shutdown_requires_confirm
+  category: automation
+  mode: creator
+  input: "shut down in 5 minutes"
+  setup:
+    auto_confirm: false
+  stub_responses:
+    - tool_calls:
+        - name: shutdown_timer
+          arguments: {minutes: 5}
+    - content: "Shutdown cancelled because confirmation was denied."
+  forbidden_tools: [shutdown_timer]
+  checks:
+    - type: tool_count_at_most
+      n: 0
+
+- id: automation_open_app
+  category: automation
+  input: "open notepad"
+  stub_responses:
+    - tool_calls:
+        - name: open_application
+          arguments: {name: "notepad"}
+    - content: "Opened Notepad."
+  expected_tools: [open_application]
+  forbidden_tools: [run_python, search_web]
+  checks:
+    - type: tool_count_at_most
+      n: 2
+
+- id: automation_type_into_app
+  category: automation
+  mode: creator
+  input: "open notepad and type hello world"
+  setup:
+    auto_confirm: true
+  stub_responses:
+    - tool_calls:
+        - name: type_into_app
+          arguments: {app: "notepad", text: "hello world"}
+    - content: "Typed 'hello world' into Notepad."
+  expected_tools: [type_into_app]
+  checks:
+    - type: tool_count_at_most
+      n: 4
+
+- id: automation_type_into_app_requires_confirm
+  category: automation
+  mode: creator
+  input: "type password into notepad"
+  setup:
+    auto_confirm: false
+  stub_responses:
+    - tool_calls:
+        - name: type_into_app
+          arguments: {app: "notepad", text: "password"}
+    - content: "Typing cancelled without confirmation."
+  forbidden_tools: [type_into_app]
+  checks:
+    - type: tool_count_at_most
+      n: 0
+
+- id: automation_anonymous_denied_lock
+  category: automation
+  mode: restricted
+  input: "lock the screen"
+  setup:
+    auto_confirm: true
+  stub_responses:
+    - tool_calls:
+        - name: lock_screen
+          arguments: {}
+    - content: "Restricted users cannot lock the screen."
+  forbidden_tools: [lock_screen]
+  checks:
+    - type: tool_count_at_most
+      n: 0
+
+- id: automation_anonymous_denied_volume
+  category: automation
+  mode: restricted
+  input: "set volume to 80"
+  stub_responses:
+    - tool_calls:
+        - name: set_volume
+          arguments: {level: 80}
+    - content: "Restricted users cannot change system volume."
+  forbidden_tools: [set_volume]
+  checks:
+    - type: tool_count_at_most
+      n: 0
