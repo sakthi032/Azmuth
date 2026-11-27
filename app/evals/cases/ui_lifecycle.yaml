@@ -79,3 +79,13 @@
     - type: response_not_matches
       pattern: "Traceback \\(most recent call last\\)|\\[runner\\]"
     - type: no_template_label_leak
+
+- id: ui_lifecycle_stop_single_marker
+  category: ui_lifecycle
+  input: "stop"
+  stub_responses:
+    - content: "Stopped."
+  checks:
+    - type: response_matches
+      pattern: "^Stopped\\.?$"
+    - type: no_template_label_leak

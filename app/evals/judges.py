@@ -131,6 +131,7 @@ def judge(check: Check, case: Case, result: CaseResult) -> JudgeResult:
     if t == "no_template_label_leak":
         forbidden = [
             "Display (full detail)",
+            "Spoken (",
             "Spoken (1-2 natural sentences)",
             "[Detailed answer markdown]",
         ]

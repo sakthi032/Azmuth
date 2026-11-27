@@ -211,3 +211,21 @@ async def test_mutation_wrong_tool_for_note_fails_eval():
     )
     result = await run_case(mutated)
     assert result.passed is False, "Expected eval case to FAIL when note routes to schedule_reminder"
+
+
+@pytest.mark.asyncio
+async def test_mutation_skip_stopped_marker_fails_eval():
+    """Functional mutation 6: if Stop skips or duplicates the 'Stopped' marker,
+    ui_lifecycle_stop_single_marker MUST FAIL."""
+    case = _case_by_id("ui_lifecycle_stop_single_marker")
+    for bad_content in ("", "Stopped. Stopped."):
+        mutated = Case(
+            id=case.id,
+            category=case.category,
+            input=case.input,
+            mode=case.mode,
+            stub_responses=[StubResponse(content=bad_content)],
+            checks=case.checks,
+        )
+        result = await run_case(mutated)
+        assert result.passed is False, f"Expected eval case to FAIL for {bad_content!r}"

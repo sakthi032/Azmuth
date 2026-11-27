@@ -147,8 +147,11 @@ def diff_against_baseline(result: RunResult) -> dict:
             regressions.append(cr.case.id)
         elif not was and cr.passed:
             improvements.append(cr.case.id)
+    baseline_summary = baseline.get("summary") or {}
+    baseline_rate = baseline_summary.get("pass_rate")
     return {
         "baseline": str(baseline_path),
+        "baseline_pass_rate": baseline_rate,
         "regressions": regressions,
         "improvements": improvements,
     }

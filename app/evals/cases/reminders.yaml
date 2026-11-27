@@ -155,3 +155,37 @@
   checks:
     - type: response_matches
       pattern: "reminder"
+
+- id: reminder_no_duplicate_creation
+  category: reminders
+  input: "remind me in 2 hours to call the dentist"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {message: "call the dentist", when_text: "in 2 hours"}
+    - content: "That reminder already exists — I didn't create a duplicate."
+  setup:
+    tool_outputs:
+      schedule_reminder:
+        scheduled: false
+        duplicate: true
+  expected_tools: [schedule_reminder]
+  checks:
+    - type: tool_count_at_most
+      n: 1
+    - type: response_matches
+      pattern: "(duplicate|already exists)"
+
+- id: reminder_snooze
+  category: reminders
+  input: "snooze my dentist reminder for 15 minutes"
+  stub_responses:
+    - tool_calls:
+        - name: schedule_reminder
+          arguments: {message: "call the dentist", when_text: "in 15 minutes"}
+    - content: "Snoozed your dentist reminder for 15 minutes."
+  expected_tools: [schedule_reminder]
+  forbidden_tools: [search_web]
+  checks:
+    - type: response_matches
+      pattern: "(snoozed|15 minutes)"

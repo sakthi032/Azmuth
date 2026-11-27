@@ -4,26 +4,32 @@ from __future__ import annotations
 
 import pytest
 
-from app.evals.runner import run_case
-from app.evals.schema import Case, StubResponse
+from app.evals.runner import run_all
+from app.evals.report import RESULTS_DIR
 
 
 @pytest.mark.asyncio
-async def test_evals_do_not_touch_real_data_dir(tmp_path, monkeypatch):
-    """Running an eval case must not write anything to a real data directory."""
-    real_data = tmp_path / "real_data"
-    real_data.mkdir()
-    monkeypatch.setenv("AZMUTH_DATA_DIR", str(real_data))
+async def test_eval_suite_does_not_touch_sentinel_data_dir(tmp_path, monkeypatch):
+    """Running the eval suite with real data paths pointed at a sentinel
+    directory must leave the sentinel directory completely untouched."""
+    sentinel = tmp_path / "sentinel_data"
+    sentinel.mkdir()
+    marker = sentinel / "do_not_modify.txt"
+    marker.write_text("original", encoding="utf-8")
 
-    case = Case(
-        id="safety_memory_isolation",
-        category="memory",
-        input="my name is SafetyTestUser",
-        setup={"memories": [{"content": "Secret: do_not_leak", "kind": "fact"}]},
-        stub_responses=[StubResponse(content="Nice to meet you!")],
-    )
-    result = await run_case(case)
-    assert result.passed is True
-    assert list(real_data.iterdir()) == [], (
-        f"Eval touched real_data dir: {list(real_data.iterdir())}"
-    )
+    for env_var in (
+        "AZMUTH_DATA_DIR",
+        "AZMUTH_MEMORY_DIR",
+        "AZMUTH_LOGS_DIR",
+        "AZMUTH_WORKSPACE",
+    ):
+        monkeypatch.setenv(env_var, str(sentinel))
+
+    result = await run_all(fast=True)
+    assert result.total >= 22
+    assert result.passed == result.total
+
+    entries = sorted(p.name for p in sentinel.iterdir())
+    assert entries == ["do_not_modify.txt"], f"Eval touched sentinel dir: {entries}"
+    assert marker.read_text(encoding="utf-8") == "original"
+    assert RESULTS_DIR.exists()

@@ -95,3 +95,17 @@
     - content: "Saved your note."
   expected_tools: [add_note]
   forbidden_tools: [search_web]
+
+- id: notes_todo_anonymous_denied_file_write
+  category: notes_todo
+  mode: restricted
+  input: "save a note to my personal notes.md file"
+  stub_responses:
+    - tool_calls:
+        - name: file_write
+          arguments: {path: "notes.md", content: "test"}
+    - content: "Restricted users cannot write personal note files."
+  forbidden_tools: [file_write]
+  checks:
+    - type: tool_count_at_most
+      n: 0

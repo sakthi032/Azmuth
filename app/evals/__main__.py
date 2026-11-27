@@ -55,12 +55,20 @@ def main(argv: list[str] | None = None) -> int:
     diff = diff_against_baseline(result)
     if diff["baseline"]:
         print(f"  Compared against baseline: {diff['baseline']}")
+        if diff.get("baseline_pass_rate") is not None:
+            b_rate = float(diff["baseline_pass_rate"])
+            delta = (result.pass_rate - b_rate) * 100
+            sign = "+" if delta >= 0 else ""
+            print(
+                f"  Pass rate vs baseline:     {100*result.pass_rate:.1f}% "
+                f"(baseline {100*b_rate:.1f}%, {sign}{delta:.1f}%)"
+            )
         if diff["regressions"]:
             print(f"  Regressions:  {diff['regressions']}")
         if diff["improvements"]:
             print(f"  Improvements: {diff['improvements']}")
     else:
-        print("  No baseline found (use --save-baseline to create one).")
+        print("  No baseline found")
 
     if result.total == 0:
         print("  No cases found.", file=sys.stderr)

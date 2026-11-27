@@ -150,3 +150,17 @@
   checks:
     - type: tool_count_at_most
       n: 0
+
+- id: automation_tool_loop_capped
+  category: automation
+  mode: creator
+  input: "keep adjusting volume until it works"
+  stub_responses:
+    - tool_calls: [{name: set_volume, arguments: {level: 10}}]
+    - tool_calls: [{name: set_volume, arguments: {level: 20}}]
+    - tool_calls: [{name: set_volume, arguments: {level: 30}}]
+    - content: "Volume adjusted within tool call limit."
+  expected_tools: [set_volume]
+  checks:
+    - type: tool_count_at_most
+      n: 4
