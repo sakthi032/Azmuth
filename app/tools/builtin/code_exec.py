@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -86,10 +87,15 @@ _TEXT_EXTS = {
 _RUNNER_SCRIPT = r'''"""Azmuth sandbox runner (audit-hook based)."""
 import sys
 
-def _log(msg):
-    print(f"[runner] {msg}", file=sys.stderr, flush=True)
+_LOG_FH = None
 
-_log("start")
+def _log(msg):
+    if _LOG_FH is not None:
+        try:
+            _LOG_FH.write(f"[runner] {msg}\n")
+            _LOG_FH.flush()
+        except Exception:
+            pass
 
 try:
     import os as _os
@@ -97,9 +103,15 @@ try:
         _os.environ.get("AZMUTH_SANDBOX_TMP", _os.getcwd())
     )
     _os.chdir(_TMPDIR)
+    try:
+        _LOG_FH = open(_os.path.join(_TMPDIR, "_runner.log"), "a", encoding="utf-8")
+    except Exception:
+        _LOG_FH = None
 except Exception as _e:
     _log(f"tmpdir setup failed: {_e}")
     sys.exit(2)
+
+_log("start")
 
 def _safe_realpath(p):
     try:
@@ -131,6 +143,7 @@ except Exception as _e:
 class _Blocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         if fullname.split(".", 1)[0] in _BLOCKED_MODULES:
+            _log(f"blocked module: {fullname}")
             raise ImportError(
                 f"module {fullname!r} is blocked in the Azmuth sandbox"
             )
@@ -165,6 +178,7 @@ _log(f"blocked audit events: {sorted(_BLOCKED_AUDIT_EVENTS)}")
 
 def _audit_hook(event, args):
     if event in _BLOCKED_AUDIT_EVENTS:
+        _log(f"blocked audit event: {event}")
         raise RuntimeError(
             f"{event!r} is blocked in the Azmuth sandbox"
         )
@@ -201,6 +215,7 @@ try:
         if not (
             real == _TMPDIR or real.startswith(_TMPDIR + _os.sep)
         ):
+            _log(f"blocked rmtree: {path}")
             raise PermissionError(
                 f"shutil.rmtree outside sandbox blocked: {path}"
             )
@@ -231,6 +246,7 @@ try:
                 for x in _PREFIXES
             )
             if not (in_tmp or in_pfx):
+                _log(f"blocked open: {p}")
                 raise PermissionError(
                     f"access outside sandbox blocked: {p}"
                 )
@@ -352,6 +368,46 @@ def _classify(name: str) -> str:
     return "binary"
 
 
+_EXC_LINE_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Exit|Interrupt|Warning))(?:\s*:|$)"
+)
+_MISSING_MOD_RE = re.compile(
+    r"No module named ['\"]([A-Za-z0-9_.-]+)['\"]"
+)
+
+
+def _strip_runner_lines(stderr: str) -> str:
+    """Remove any [runner] diagnostic lines from stderr."""
+    lines = [
+        line for line in (stderr or "").splitlines(keepends=True)
+        if not line.lstrip().startswith("[runner]")
+    ]
+    return "".join(lines)
+
+
+def _extract_error_type(stderr: str, *, timed_out: bool, ok: bool) -> str | None:
+    if ok:
+        return None
+    if timed_out:
+        return "TimeoutError"
+    for line in reversed((stderr or "").splitlines()):
+        s = line.strip()
+        if not s:
+            continue
+        m = _EXC_LINE_RE.match(s)
+        if m:
+            return m.group(1)
+        break
+    return "ExecutionError"
+
+
+def _extract_missing_library(stderr: str) -> str | None:
+    m = _MISSING_MOD_RE.search(stderr or "")
+    if not m:
+        return None
+    return m.group(1).split(".", 1)[0]
+
+
 class CodeSandbox:
     """Async wrapper around a subprocess Python sandbox."""
 
@@ -385,7 +441,7 @@ class CodeSandbox:
             runner_path.write_text(_RUNNER_SCRIPT, encoding="utf-8")
             user_path = tmpdir / "_user.py"
             user_path.write_text(code, encoding="utf-8")
-            initial = copied | {"_runner.py", "_user.py"}
+            initial = copied | {"_runner.py", "_user.py", "_runner.log"}
 
             # Config dir for matplotlib (inside temp dir, not user home)
             mpl_dir = tmpdir / ".mpl"
@@ -418,6 +474,7 @@ class CodeSandbox:
                 "PYTHONIOENCODING": "utf-8",
                 "MPLBACKEND": "Agg",
                 "MPLCONFIGDIR": str(mpl_dir),
+                "XDG_CACHE_HOME": str(mpl_dir),
                 "AZMUTH_SANDBOX_TMP": str(tmpdir),
             }
 
@@ -467,7 +524,19 @@ class CodeSandbox:
 
             duration_ms = (time.monotonic() - started) * 1000
             stdout = (out_b or b"").decode("utf-8", errors="replace")[:MAX_OUTPUT_BYTES]
-            stderr = (err_b or b"").decode("utf-8", errors="replace")[:MAX_OUTPUT_BYTES]
+            raw_stderr = (err_b or b"").decode("utf-8", errors="replace")[:MAX_OUTPUT_BYTES]
+            clean_stderr = _strip_runner_lines(raw_stderr)
+            stderr_tail = clean_stderr[-2000:]
+
+            debug_log: str | None = None
+            if os.environ.get("AZMUTH_SANDBOX_DEBUG") == "1":
+                log_file = tmpdir / "_runner.log"
+                if log_file.is_file():
+                    try:
+                        debug_log = log_file.read_text(encoding="utf-8", errors="replace")
+                        logger.debug("sandbox runner diagnostics:\n%s", debug_log)
+                    except OSError:
+                        pass
 
             # Capture new files
             captured: list[dict[str, Any]] = []
@@ -494,6 +563,8 @@ class CodeSandbox:
                 captured.append(entry)
 
             success = proc.returncode == 0 and not timed_out
+            error_type = _extract_error_type(clean_stderr, timed_out=timed_out, ok=success)
+            missing_lib = None if success else _extract_missing_library(clean_stderr)
             if not success:
                 logger.warning(
                     "sandbox returned non-zero",
@@ -501,19 +572,34 @@ class CodeSandbox:
                         "event": "SANDBOX_NONZERO",
                         "exit_code": proc.returncode,
                         "timed_out": timed_out,
-                        "stderr_head": (stderr or "")[:800],
+                        "error_type": error_type,
+                        "stderr_tail": stderr_tail[:800],
                     },
                 )
-            return {
+            res: dict[str, Any] = {
+                "ok": success,
                 "success": success,
                 "exit_code": proc.returncode,
                 "stdout": stdout,
-                "stderr": stderr,
+                "stderr_tail": stderr_tail,
+                "stderr": clean_stderr,
+                "error_type": error_type,
                 "timed_out": timed_out,
                 "duration_ms": round(duration_ms, 1),
                 "files": captured,
                 "retryable": False,
             }
+            if debug_log is not None:
+                res["debug"] = debug_log
+            if missing_lib:
+                pip_cmd = f"pip install {missing_lib}"
+                res["missing_library"] = missing_lib
+                res["pip_command"] = pip_cmd
+                res["user_message"] = (
+                    f"Missing Python library '{missing_lib}'. "
+                    f"Install it with: {pip_cmd}"
+                )
+            return res
         finally:
             _close_job(job)
             shutil.rmtree(tmpdir, ignore_errors=True)

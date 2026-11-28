@@ -1,0 +1,13 @@
+{
+  "started_at": "2026-11-27T10:00:07.134124+00:00",
+  "finished_at": "2026-11-27T10:00:07.134143+00:00",
+  "duration_ms": 0.0,
+  "category": "chat",
+  "summary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "pass_rate": 0.0
+  },
+  "cases": []
+}

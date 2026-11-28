@@ -182,8 +182,13 @@ def setup_logging(settings: Settings, *, force: bool = False) -> logging.Logger:
         root.addHandler(file_handler)
 
     # Third-party noise control.
-    for noisy in ("httpx", "httpcore", "urllib3"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    target_noisy_level = (
+        logging.DEBUG
+        if str(settings.log_level).upper() == "DEBUG"
+        else logging.WARNING
+    )
+    for noisy in ("websockets", "asyncio", "chromadb", "httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(target_noisy_level)
 
     _CONFIGURED = True
     return root

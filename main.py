@@ -252,6 +252,21 @@ def _run_debug_tools(settings: Settings, message: str | None = None) -> int:
     return 0
 
 # --------------------------------------------------------------------------
+_SANDBOX_LIBRARIES: tuple[str, ...] = ("matplotlib", "numpy", "pandas", "openpyxl")
+
+
+def _check_sandbox_libraries() -> tuple[bool, str]:
+    """Check whether allow-listed sandbox data/plotting libraries are installed."""
+    import importlib.util
+
+    missing = [lib for lib in _SANDBOX_LIBRARIES if importlib.util.find_spec(lib) is None]
+    if missing:
+        cmd = f"pip install {' '.join(missing)}"
+        return False, f"Missing sandbox libraries: {', '.join(missing)} — fix: {cmd}"
+    return True, f"sandbox libraries ready ({', '.join(_SANDBOX_LIBRARIES)})"
+
+
+# --------------------------------------------------------------------------
 # Tool health check
 # --------------------------------------------------------------------------
 def _run_check_tools(settings: Settings) -> int:
@@ -301,6 +316,8 @@ def _run_check_tools(settings: Settings) -> int:
         if tool_name in ("take_screenshot", "describe_screen"):
             import PIL.ImageGrab  # noqa: F401
             return True, "Pillow ImageGrab ready"
+        if tool_name == "run_python":
+            return _check_sandbox_libraries()
         return True, ""
 
     all_meta = azmuth.tools.list_metadata()

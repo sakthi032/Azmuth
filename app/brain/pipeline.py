@@ -392,7 +392,9 @@ class Brain:
                     failed_details = [f"- Step {s.id} ({s.title}): {s.error}" for s in plan.steps if s.status == StepStatus.FAILED]
                     if failed_details:
                         plan_blocks.append("\n**Failure Breakdown:**\n" + "\n".join(failed_details))
-                    spoken_summary = f"Plan execution encountered an error and could not be verified: {plan.summary}"
+                    spoken_summary = _sanitize_spoken_text(
+                        f"Plan execution encountered an error and could not be verified: {plan.summary}"
+                    )
 
                 final_text = "\n\n".join(plan_blocks) + f"\n\n<spoken>\n{spoken_summary}\n</spoken>"
                 display_text, spoken_text = _split_spoken_block(final_text)
@@ -597,7 +599,9 @@ class Brain:
 
                 # B5: track run_python failures (reset on success)
                 if call.name == "run_python":
-                    if record.success:
+                    out_dict = record.output if isinstance(record.output, dict) else {}
+                    sb_ok = record.success and out_dict.get("ok", out_dict.get("success", True))
+                    if sb_ok:
                         run_python_failures = 0
                     else:
                         run_python_failures += 1
@@ -676,6 +680,7 @@ class Brain:
         display_text, spoken_text = _split_spoken_block(final_text)
         if not spoken_text:
             spoken_text = _fallback_spoken(display_text)
+        spoken_text = _sanitize_spoken_text(spoken_text)
         final_text = display_text
         if not final_text.strip():
             raise ProviderUnavailableError(
@@ -1364,6 +1369,25 @@ def _format_memory_list(records: list) -> str:
         )
         lines.append(f"- {r.content}{kind_label}")
     return "\n".join(lines)
+
+
+_TRACEBACK_MARKERS = (
+    "Traceback (most recent call last):",
+    "[runner]",
+    "File \"<sandbox>\"",
+)
+
+
+def _sanitize_spoken_text(text: str) -> str:
+    """Never speak Python tracebacks or runner diagnostics aloud."""
+    if not text:
+        return ""
+    for marker in _TRACEBACK_MARKERS:
+        if marker in text:
+            return "The code failed, details are on screen."
+    if re.search(r"\b(?:Error|Exception):\s", text) and ("Plan execution encountered an error" in text or "run_python" in text):
+        return "The code failed, details are on screen."
+    return text
 
 
 def _fallback_spoken(text: str) -> str:

@@ -1,0 +1,852 @@
+{
+  "started_at": "2026-11-27T12:34:50.432243+00:00",
+  "finished_at": "2026-11-27T12:34:53.118689+00:00",
+  "duration_ms": 2688.0,
+  "category": "all",
+  "summary": {
+    "total": 22,
+    "passed": 22,
+    "failed": 0,
+    "pass_rate": 1.0
+  },
+  "cases": [
+    {
+      "id": "automation_volume_set",
+      "category": "automation",
+      "passed": true,
+      "input": "set volume to 50",
+      "expected_tools": [
+        "set_volume"
+      ],
+      "forbidden_tools": [
+        "mute",
+        "search_web"
+      ],
+      "actual_tools": [
+        "set_volume"
+      ],
+      "response_text": "Volume set to 50%.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 860.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "tool_count_at_most",
+          "passed": true,
+          "reason": "1 tools called, max allowed 2"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "set_volume was called; actual=['set_volume']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "mute was NOT called; actual=['set_volume']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=['set_volume']"
+        }
+      ]
+    },
+    {
+      "id": "automation_mute",
+      "category": "automation",
+      "passed": true,
+      "input": "mute the audio",
+      "expected_tools": [
+        "mute"
+      ],
+      "forbidden_tools": [
+        "set_volume"
+      ],
+      "actual_tools": [
+        "mute"
+      ],
+      "response_text": "Audio muted.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 125.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "tool_count_at_most",
+          "passed": true,
+          "reason": "1 tools called, max allowed 2"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "mute was called; actual=['mute']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "set_volume was NOT called; actual=['mute']"
+        }
+      ]
+    },
+    {
+      "id": "chat_greeting",
+      "category": "chat",
+      "passed": true,
+      "input": "hi",
+      "expected_tools": [],
+      "forbidden_tools": [
+        "search_web",
+        "get_weather",
+        "get_gold_rate",
+        "run_python"
+      ],
+      "actual_tools": [],
+      "response_text": "Hello! How can I help you today?",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 109.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_not_matches",
+          "passed": true,
+          "reason": "forbidden pattern absent: '\\\\[TOOL_RESULT'"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=[]"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "get_weather was NOT called; actual=[]"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "get_gold_rate was NOT called; actual=[]"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "run_python was NOT called; actual=[]"
+        }
+      ]
+    },
+    {
+      "id": "chat_math_simple",
+      "category": "chat",
+      "passed": true,
+      "input": "what is 2 + 2?",
+      "expected_tools": [],
+      "forbidden_tools": [
+        "run_python",
+        "search_web"
+      ],
+      "actual_tools": [],
+      "response_text": "2 + 2 = 4.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 78.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_contains",
+          "passed": true,
+          "reason": "text found: '4'"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "run_python was NOT called; actual=[]"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=[]"
+        }
+      ]
+    },
+    {
+      "id": "code_runner_simple_math",
+      "category": "code_runner",
+      "passed": true,
+      "input": "use python to calculate factorial of 10",
+      "expected_tools": [
+        "run_python"
+      ],
+      "forbidden_tools": [],
+      "actual_tools": [
+        "run_python"
+      ],
+      "response_text": "10! = 3628800.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 110.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_contains",
+          "passed": true,
+          "reason": "text found: '3628800'"
+        },
+        {
+          "check": "response_no_runner_lines",
+          "passed": true,
+          "reason": "no [runner] lines in response"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "run_python was called; actual=['run_python']"
+        }
+      ]
+    },
+    {
+      "id": "code_runner_csv_sum",
+      "category": "code_runner",
+      "passed": true,
+      "input": "sum column B of data.csv using python",
+      "expected_tools": [
+        "run_python"
+      ],
+      "forbidden_tools": [],
+      "actual_tools": [
+        "run_python"
+      ],
+      "response_text": "The sum of column B in data.csv is 150.5.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 93.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_contains",
+          "passed": true,
+          "reason": "text found: '150.5'"
+        },
+        {
+          "check": "response_no_runner_lines",
+          "passed": true,
+          "reason": "no [runner] lines in response"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "run_python was called; actual=['run_python']"
+        }
+      ]
+    },
+    {
+      "id": "documents_read_txt",
+      "category": "documents",
+      "passed": true,
+      "input": "read my notes.txt file",
+      "expected_tools": [
+        "read_document"
+      ],
+      "forbidden_tools": [
+        "search_web",
+        "run_python"
+      ],
+      "actual_tools": [
+        "read_document"
+      ],
+      "response_text": "Summary of notes.txt (source: notes.txt, p.1): Action items for Q4.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 79.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_has_citation",
+          "passed": true,
+          "reason": "citation present"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "read_document was called; actual=['read_document']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=['read_document']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "run_python was NOT called; actual=['read_document']"
+        }
+      ]
+    },
+    {
+      "id": "documents_read_csv",
+      "category": "documents",
+      "passed": true,
+      "input": "open sales.csv and summarize it",
+      "expected_tools": [
+        "read_document"
+      ],
+      "forbidden_tools": [
+        "search_web"
+      ],
+      "actual_tools": [
+        "read_document"
+      ],
+      "response_text": "Total rows: 42 in sales.csv (source: sales.csv, p.1).",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 93.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_has_citation",
+          "passed": true,
+          "reason": "citation present"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "read_document was called; actual=['read_document']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=['read_document']"
+        }
+      ]
+    },
+    {
+      "id": "memory_store_name",
+      "category": "memory",
+      "passed": true,
+      "input": "my name is Sakthi",
+      "expected_tools": [],
+      "forbidden_tools": [
+        "run_python",
+        "search_web"
+      ],
+      "actual_tools": [],
+      "response_text": "Nice to meet you, Sakthi! I'll remember that.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 94.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_contains",
+          "passed": true,
+          "reason": "text found: 'Sakthi'"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "run_python was NOT called; actual=[]"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=[]"
+        }
+      ]
+    },
+    {
+      "id": "memory_recall_seeded_fact",
+      "category": "memory",
+      "passed": true,
+      "input": "what is my name?",
+      "expected_tools": [],
+      "forbidden_tools": [
+        "search_web",
+        "run_python"
+      ],
+      "actual_tools": [],
+      "response_text": "Your name is Sakthi.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 94.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_contains",
+          "passed": true,
+          "reason": "text found: 'Sakthi'"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=[]"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "run_python was NOT called; actual=[]"
+        }
+      ]
+    },
+    {
+      "id": "notes_todo_add_note",
+      "category": "notes_todo",
+      "passed": true,
+      "input": "add a note: buy milk and eggs",
+      "expected_tools": [
+        "add_note"
+      ],
+      "forbidden_tools": [
+        "add_todo",
+        "schedule_reminder",
+        "search_web"
+      ],
+      "actual_tools": [
+        "add_note"
+      ],
+      "response_text": "Added note: buy milk and eggs.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 94.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_matches",
+          "passed": true,
+          "reason": "pattern matched: 'note|buy milk'"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "add_note was called; actual=['add_note']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "add_todo was NOT called; actual=['add_note']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "schedule_reminder was NOT called; actual=['add_note']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=['add_note']"
+        }
+      ]
+    },
+    {
+      "id": "notes_todo_add_todo",
+      "category": "notes_todo",
+      "passed": true,
+      "input": "add a todo: finish the quarterly report",
+      "expected_tools": [
+        "add_todo"
+      ],
+      "forbidden_tools": [
+        "add_note",
+        "schedule_reminder",
+        "search_web"
+      ],
+      "actual_tools": [
+        "add_todo"
+      ],
+      "response_text": "Added to-do: finish the quarterly report.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 62.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_matches",
+          "passed": true,
+          "reason": "pattern matched: 'to-?do|quarterly report'"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "add_todo was called; actual=['add_todo']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "add_note was NOT called; actual=['add_todo']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "schedule_reminder was NOT called; actual=['add_todo']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=['add_todo']"
+        }
+      ]
+    },
+    {
+      "id": "reminder_english_in_2_hours",
+      "category": "reminders",
+      "passed": true,
+      "input": "remind me in 2 hours to call the dentist",
+      "expected_tools": [
+        "schedule_reminder"
+      ],
+      "forbidden_tools": [
+        "search_web",
+        "run_python"
+      ],
+      "actual_tools": [
+        "schedule_reminder"
+      ],
+      "response_text": "Reminder set: call the dentist in 2 hours.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 78.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_matches",
+          "passed": true,
+          "reason": "pattern matched: '(call the dentist|2 hours|reminder set)'"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "schedule_reminder was called; actual=['schedule_reminder']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=['schedule_reminder']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "run_python was NOT called; actual=['schedule_reminder']"
+        }
+      ]
+    },
+    {
+      "id": "reminder_english_in_10_minutes",
+      "category": "reminders",
+      "passed": true,
+      "input": "set a reminder in 10 minutes to stretch",
+      "expected_tools": [
+        "schedule_reminder"
+      ],
+      "forbidden_tools": [
+        "add_note",
+        "add_todo"
+      ],
+      "actual_tools": [
+        "schedule_reminder"
+      ],
+      "response_text": "I'll remind you to stretch in 10 minutes.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 94.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_matches",
+          "passed": true,
+          "reason": "pattern matched: 'stretch'"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "schedule_reminder was called; actual=['schedule_reminder']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "add_note was NOT called; actual=['schedule_reminder']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "add_todo was NOT called; actual=['schedule_reminder']"
+        }
+      ]
+    },
+    {
+      "id": "security_anonymous_refused_run_python",
+      "category": "security",
+      "passed": true,
+      "input": "run python to print 2+2",
+      "expected_tools": [],
+      "forbidden_tools": [
+        "run_python"
+      ],
+      "actual_tools": [],
+      "response_text": "I can't run code \u2014 this requires Creator mode.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 78.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_matches",
+          "passed": true,
+          "reason": "pattern matched: \"(can't|cannot|permission|creator)\""
+        },
+        {
+          "check": "tool_count_at_most",
+          "passed": true,
+          "reason": "0 tools called, max allowed 0"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "run_python was NOT called; actual=[]"
+        }
+      ]
+    },
+    {
+      "id": "security_anonymous_refused_lock_screen",
+      "category": "security",
+      "passed": true,
+      "input": "lock my screen",
+      "expected_tools": [],
+      "forbidden_tools": [
+        "lock_screen"
+      ],
+      "actual_tools": [],
+      "response_text": "Lock screen requires Creator mode.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 78.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "tool_count_at_most",
+          "passed": true,
+          "reason": "0 tools called, max allowed 0"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "lock_screen was NOT called; actual=[]"
+        }
+      ]
+    },
+    {
+      "id": "tamil_tanglish_greeting_tamil",
+      "category": "tamil_tanglish",
+      "passed": true,
+      "input": "\u0bb5\u0ba3\u0b95\u0bcd\u0b95\u0bae\u0bcd, \u0b8e\u0baa\u0bcd\u0baa\u0b9f\u0bbf \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc0\u0b99\u0bcd\u0b95?",
+      "expected_tools": [],
+      "forbidden_tools": [
+        "search_web",
+        "run_python"
+      ],
+      "actual_tools": [],
+      "response_text": "\u0bb5\u0ba3\u0b95\u0bcd\u0b95\u0bae\u0bcd! \u0ba8\u0bbe\u0ba9\u0bcd \u0ba8\u0bb2\u0bae\u0bbe\u0b95 \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bbf\u0bb1\u0bc7\u0ba9\u0bcd. \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bc1\u0b95\u0bcd\u0b95\u0bc1 \u0b8e\u0baa\u0bcd\u0baa\u0b9f\u0bbf \u0b89\u0ba4\u0bb5\u0bb2\u0bbe\u0bae\u0bcd?",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 110.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_no_script_mixing",
+          "passed": true,
+          "reason": "no mixed-script tokens"
+        },
+        {
+          "check": "response_matches",
+          "passed": true,
+          "reason": "pattern matched: '\u0bb5\u0ba3\u0b95\u0bcd\u0b95\u0bae\u0bcd|\u0ba8\u0bb2\u0bae\u0bbe\u0b95|\u0b89\u0ba4\u0bb5\u0bb2\u0bbe\u0bae\u0bcd'"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=[]"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "run_python was NOT called; actual=[]"
+        }
+      ]
+    },
+    {
+      "id": "tamil_tanglish_greeting_tanglish",
+      "category": "tamil_tanglish",
+      "passed": true,
+      "input": "vanakkam bro, eppadi irukka?",
+      "expected_tools": [],
+      "forbidden_tools": [
+        "search_web",
+        "run_python"
+      ],
+      "actual_tools": [],
+      "response_text": "Vanakkam! Naan nalla irukken. Enna help venum?",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 78.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_no_script_mixing",
+          "passed": true,
+          "reason": "no mixed-script tokens"
+        },
+        {
+          "check": "response_matches",
+          "passed": true,
+          "reason": "pattern matched: 'Vanakkam|nalla|help'"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=[]"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "run_python was NOT called; actual=[]"
+        }
+      ]
+    },
+    {
+      "id": "tool_selection_weather_basic",
+      "category": "tool_selection",
+      "passed": true,
+      "input": "what's the weather in Chennai?",
+      "expected_tools": [
+        "get_weather"
+      ],
+      "forbidden_tools": [
+        "search_web",
+        "get_gold_rate"
+      ],
+      "actual_tools": [
+        "get_weather"
+      ],
+      "response_text": "It's 29\u00b0C in Chennai with patchy rain.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 78.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "get_weather was called; actual=['get_weather']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=['get_weather']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "get_gold_rate was NOT called; actual=['get_weather']"
+        }
+      ]
+    },
+    {
+      "id": "tool_selection_gold_basic",
+      "category": "tool_selection",
+      "passed": true,
+      "input": "what is the gold rate today?",
+      "expected_tools": [
+        "get_gold_rate"
+      ],
+      "forbidden_tools": [
+        "search_web",
+        "get_weather"
+      ],
+      "actual_tools": [
+        "get_gold_rate"
+      ],
+      "response_text": "Gold is \u20b97,200 per gram in Chennai today.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 78.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "get_gold_rate was called; actual=['get_gold_rate']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "search_web was NOT called; actual=['get_gold_rate']"
+        },
+        {
+          "check": "tool_not_called",
+          "passed": true,
+          "reason": "get_weather was NOT called; actual=['get_gold_rate']"
+        }
+      ]
+    },
+    {
+      "id": "ui_lifecycle_no_template_label",
+      "category": "ui_lifecycle",
+      "passed": true,
+      "input": "explain quantum computing simply",
+      "expected_tools": [],
+      "forbidden_tools": [],
+      "actual_tools": [],
+      "response_text": "Quantum computing uses qubits that can represent 0 and 1 simultaneously.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 62.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "no_template_label_leak",
+          "passed": true,
+          "reason": "no template labels leaked"
+        },
+        {
+          "check": "response_not_matches",
+          "passed": true,
+          "reason": "forbidden pattern absent: '<spoken>|</spoken>'"
+        }
+      ]
+    },
+    {
+      "id": "ui_lifecycle_spoken_tag_stripped",
+      "category": "ui_lifecycle",
+      "passed": true,
+      "input": "what time is it?",
+      "expected_tools": [
+        "get_time"
+      ],
+      "forbidden_tools": [],
+      "actual_tools": [
+        "get_time"
+      ],
+      "response_text": "It is 3:00 PM.",
+      "model": "scripted",
+      "provider": "scripted",
+      "duration_ms": 63.0,
+      "error": "",
+      "judges": [
+        {
+          "check": "response_not_matches",
+          "passed": true,
+          "reason": "forbidden pattern absent: '<spoken>|</spoken>'"
+        },
+        {
+          "check": "no_template_label_leak",
+          "passed": true,
+          "reason": "no template labels leaked"
+        },
+        {
+          "check": "tool_called",
+          "passed": true,
+          "reason": "get_time was called; actual=['get_time']"
+        }
+      ]
+    }
+  ]
+}

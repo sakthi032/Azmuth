@@ -12,6 +12,7 @@ Enables Azmuth to handle complex, multi-step goals autonomously:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -207,6 +208,12 @@ _PLAN_VERB_PATTERNS = [
 ]
 
 
+_SINGLE_STEP_CODE_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:plot|chart|graph|draw|calculate|compute|convert|run\s+python|execute\s+python)\b",
+    re.IGNORECASE,
+)
+
+
 def is_planning_goal(text: str) -> bool:
     """Return True if the text represents a compound multi-step goal."""
     if not text or len(text.strip()) < 25:
@@ -218,8 +225,21 @@ def is_planning_goal(text: str) -> bool:
         if pat.search(lowered):
             return True
 
-    # Count matching indicators
-    hits = sum(1 for ind in _PLAN_INDICATORS if re.search(r"\b" + ind + r"\b", lowered))
+    # Single-step code/plot/calculate/convert requests should call run_python
+    # directly rather than spinning up the multi-step autonomous planner.
+    if _SINGLE_STEP_CODE_RE.search(lowered):
+        return False
+
+    # Count matching indicators (avoid double-counting "save it" + "and save")
+    hits = 0
+    matched_save = False
+    for ind in _PLAN_INDICATORS:
+        if re.search(r"\b" + ind + r"\b", lowered):
+            if ind in ("save it", "save in", "and save"):
+                if matched_save:
+                    continue
+                matched_save = True
+            hits += 1
     return hits >= 2
 
 
@@ -509,6 +529,7 @@ Output ONLY valid JSON in this exact structure:
             success = False
             error_msg: str | None = None
             max_retries = 2
+            seen_code_hashes: set[str] = set()
 
             for attempt in range(max_retries + 1):
                 try:
@@ -539,17 +560,48 @@ Output ONLY valid JSON in this exact structure:
 
                         step.arguments = resolved_args
 
-                        # Charge the tool budget (once per step, not per retry attempt)
-                        if attempt == 0:
-                            round_tools_used += 1
-                            plan.tools_used += 1
+                        # Charge the tool budget on every invocation (including retries)
+                        round_tools_used += 1
+                        plan.tools_used += 1
+
+                        # Confirmation & code-hash tracking for run_python
+                        step_confirmed = True
+                        if step.tool_name == "run_python":
+                            code_str = str(resolved_args.get("code", ""))
+                            seen_code_hashes.add(hashlib.sha256(code_str.encode("utf-8")).hexdigest())
+
+                            from app.security.modes import PermissionMode
+                            if principal.mode == PermissionMode.RESTRICTED:
+                                step_confirmed = False
+                            elif self._tools.requires_confirmation(step.tool_name):
+                                if confirmer is None:
+                                    step_confirmed = False
+                                else:
+                                    from app.brain.pipeline import ConfirmationRequest
+                                    tool_obj = self._tools.registry.get(step.tool_name)
+                                    desc = (
+                                        tool_obj.confirmation_description(resolved_args)
+                                        if hasattr(tool_obj, "confirmation_description")
+                                        else f"Run Python code:\n\n{code_str[:1500]}"
+                                    )
+                                    meta = self._tools.metadata(step.tool_name)
+                                    req = ConfirmationRequest(
+                                        tool_name=step.tool_name,
+                                        arguments=dict(resolved_args),
+                                        capability=meta.capability.value if meta else "run_sandboxed_code",
+                                        risk_level=meta.risk_level.value if meta else "high",
+                                        description=desc,
+                                    )
+                                    step_confirmed = bool(await confirmer(req))
+                                    if not step_confirmed:
+                                        raise ConfirmationRequiredError("User declined run_python execution")
 
                         # Invoke the tool through ToolManager
                         tool_result = await self._tools.invoke(
                             step.tool_name,
                             resolved_args,
                             principal=principal,
-                            confirmed=True,  # Goal execution pre-authorizes approved plan steps
+                            confirmed=step_confirmed,
                         )
 
                         if tool_result.success:
@@ -617,12 +669,24 @@ Output ONLY valid JSON in this exact structure:
 
                 # Failure recovery & Self-healing retry
                 if not success and attempt < max_retries:
-                    step.retries += 1
-                    logger.warning(
-                        "Plan step %d (%s) failed attempt %d: %s. Initiating recovery...",
-                        step.id, step.title, attempt + 1, error_msg,
-                    )
-                    self._heal_step_arguments(step, attempt)
+                    if step.tool_name == "run_python":
+                        healed = await self._heal_run_python(step, error_msg or "")
+                        new_code = str(step.arguments.get("code", ""))
+                        new_hash = hashlib.sha256(new_code.encode("utf-8")).hexdigest()
+                        if not healed or new_hash in seen_code_hashes:
+                            logger.warning(
+                                "Stopping run_python retry for step %d: identical or unchanged code",
+                                step.id,
+                            )
+                            break
+                        step.retries += 1
+                    else:
+                        step.retries += 1
+                        logger.warning(
+                            "Plan step %d (%s) failed attempt %d: %s. Initiating recovery...",
+                            step.id, step.title, attempt + 1, error_msg,
+                        )
+                        self._heal_step_arguments(step, attempt)
 
             step.duration_ms = (time.monotonic() - t_start) * 1000.0
 
@@ -675,16 +739,21 @@ Output ONLY valid JSON in this exact structure:
     async def _verify_step(self, step: PlanStep, arguments: dict[str, Any], output: Any) -> tuple[bool, str]:
         """Verify the actual execution outcome of a step with independent checks."""
         # Verification 0: run_python — files live in temp sandbox, not on disk.
-        # Verify by success flag and (optionally) captured files/stdout.
+        # Verify by ok/success flag and (optionally) captured files/stdout.
         if step.tool_name == "run_python":
             if not isinstance(output, dict):
                 return False, "run_python returned unexpected non-dict result"
-            if not output.get("success"):
-                stderr = (output.get("stderr") or "")[:300]
-                timed_out = output.get("timed_out", False)
-                if timed_out:
+            ok_flag = output.get("ok") if "ok" in output else output.get("success")
+            if not ok_flag:
+                if output.get("timed_out", False):
                     return False, "run_python timed out"
-                return False, f"run_python exited non-zero: {stderr or '(no stderr)'}"
+                user_msg = output.get("user_message")
+                stderr_tail = (output.get("stderr_tail") or output.get("stderr") or "").strip()
+                if user_msg and stderr_tail:
+                    return False, f"{user_msg}\n{stderr_tail}"
+                if user_msg:
+                    return False, user_msg
+                return False, f"run_python exited non-zero:\n{stderr_tail or '(no stderr)'}"
             files = output.get("files") or []
             stdout = (output.get("stdout") or "").strip()
             detail = f"stdout={len(stdout)} chars"
@@ -776,6 +845,40 @@ Output ONLY valid JSON in this exact structure:
         return False, "Tool produced no output"
 
     # -- 4. Self-Healing & Parameter Adaptation -----------------------------
+    async def _heal_run_python(self, step: PlanStep, error_msg: str) -> bool:
+        """Ask the LLM to fix failing run_python code using the real stderr."""
+        if self._llm is None:
+            return False
+        current_code = str(step.arguments.get("code", ""))
+        prompt = (
+            "The following Python code failed in the Azmuth sandbox.\n\n"
+            f"Current code:\n```python\n{current_code}\n```\n\n"
+            f"Error output:\n{error_msg[-2000:]}\n\n"
+            'Return ONLY valid JSON with the fixed code: {"code": "..."}'
+        )
+        req = ChatRequest(
+            messages=(
+                Message(Role.SYSTEM, "You fix Python scripts. Return ONLY JSON {\"code\": \"...\"}."),
+                Message(Role.USER, prompt),
+            ),
+            temperature=0.1,
+            max_tokens=1500,
+        )
+        try:
+            resp = await self._llm.chat(req)
+            raw = (resp.content or "").strip()
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            if not m:
+                return False
+            data = json.loads(m.group(0))
+            new_code = data.get("code")
+            if isinstance(new_code, str) and new_code.strip():
+                step.arguments["code"] = new_code
+                return True
+        except Exception as exc:
+            logger.debug("_heal_run_python failed: %s", exc)
+        return False
+
     def _heal_step_arguments(self, step: PlanStep, attempt: int) -> None:
         """Adjust tool arguments to recover from known failure modes."""
         if step.tool_name == "search_web":
